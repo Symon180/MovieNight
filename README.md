@@ -63,6 +63,6 @@ app/src/main/kotlin/com/symon/movienight/
 
 ## 👤 Autore & Licenza
 
-* **Autore:** [Simone Mariotti](https://github.com/Symone180)
+* **Autore:** [Simone Mariotti](https://github.com/Symon180)
 * **Licenza:** Rilasciato sotto licenza [MIT](LICENSE).
 
