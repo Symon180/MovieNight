@@ -4,6 +4,7 @@
 ![Jetpack Compose](https://img.shields.io/badge/Jetpack%20Compose-Material%203-4285F4?logo=jetpackcompose&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Android%20(minSdk%2024)-3DDC84?logo=android&logoColor=white)
 ![IMDb](https://img.shields.io/badge/Data-Free%20IMDb%20API-F5C518?logo=imdb&logoColor=black)
+[![CI](https://github.com/Symon180/MovieNight/actions/workflows/ci.yml/badge.svg)](https://github.com/Symon180/MovieNight/actions/workflows/ci.yml)
 
 **MovieNight** è un'applicazione Android nativa sviluppata in **Kotlin** e **Jetpack Compose** pensata per risolvere il classico dilemma serale: *"Cosa guardiamo stasera?"*.
 
