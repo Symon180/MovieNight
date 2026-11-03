@@ -58,3 +58,11 @@ app/src/main/kotlin/com/symon/movienight/
 # Compilare il pacchetto installabile APK (in app/build/outputs/apk/debug/app-debug.apk)
 ./gradlew assembleDebug
 ```
+
+---
+
+## 👤 Autore & Licenza
+
+* **Autore:** [Simone Mariotti](https://github.com/Symone180)
+* **Licenza:** Rilasciato sotto licenza [MIT](LICENSE).
+
