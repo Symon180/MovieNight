@@ -2,6 +2,7 @@ package com.symon.movienight.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.symon.movienight.data.CuratedImdbCatalog
 import com.symon.movienight.data.DefaultMovieRepository
 import com.symon.movienight.data.InMemoryLibraryStorage
 import com.symon.movienight.data.LibrarySnapshot
@@ -29,12 +30,14 @@ data class MovieNightUiState(
   val searchQuery: String = "",
   val deck: List<Movie> = emptyList(),                          // Mazzo di schede da scorrere
   val currentIndex: Int = 0,                                    // Indice della scheda visibile in cima al mazzo
-  val likedMovies: List<Movie> = emptyList(),                   // Sezione "Da Vedere" (Watchlist)
+  val likedMovies: List<Movie> = emptyList(),                   // Sezione "Da Vedere" (Watchlist illimitata)
   val watchedMovies: List<Movie> = emptyList(),                 // Sezione "Già Visti" (Watched)
-  val skippedMovies: List<Movie> = emptyList(),                 // Schede scartate nella sessione corrente
+  val skippedMovies: List<Movie> = emptyList(),                 // Schede scartate definitivamente (Swipe a Sinistra ✖️)
+  val dislikedIds: Set<String> = emptySet(),                    // ID bloccati per sempre ("Non farmelo più vedere")
   val userProgress: Map<String, UserMediaProgress> = emptyMap(),// Voti personali e progressi episodi per ID
   val pickedWinner: Movie? = null,                              // Il titolo estratto a sorte per la serata!
   val showShortlistSheet: Boolean = false,                      // Mostra/nasconde il riepilogo rapido
+  val selectedMediaForDetails: Movie? = null,                   // Scheda programma aperta a tutto schermo (Trama, Cast, Dove guardarlo, Lingue, Simili)
   val selectedMediaForEpisodes: Movie? = null,                  // Serie TV / Anime aperto nel pannello Episodi & Ratings
   val isLoadingEpisodes: Boolean = false,                       // Caricamento episodi live da Jikan / IMDb
   val malUsername: String = "",                                 // Username MyAnimeList collegato
@@ -68,12 +71,11 @@ data class MovieNightUiState(
 
 /**
  * Il "cervello" dell'app (ViewModel).
- * Gestisce:
- * - Lo scorrimento delle schede (Film, Serie TV, Anime)
- * - La sezione "Da Vedere" (Watchlist) e la sezione "Già Visti" (Watched)
- * - I voti personali ai titoli e i Ratings/Spunte dei singoli episodi
- * - Il collegamento e l'importazione da MyAnimeList (MAL)
- * - Il salvataggio automatico su memoria locale tramite `LibraryStorage`
+ * Gestisce le 4 direzioni di Swipe:
+ * 1. ➡️ Destra (`likeCurrentMovie`): Mettiamolo in lista ("Da Vedere")
+ * 2. ⬆️ Alto (`markCurrentMovieWatched`): L'ho già visto ("Già Visti")
+ * 3. ⬇️ Basso (`putBackInPool`): Rimettilo nel pool (torna in fondo al mazzo)
+ * 4. ⬅️ Sinistra (`skipCurrentMovie`): Non farmelo più vedere (bloccato per sempre in `dislikedIds`)
  */
 class MovieNightViewModel(
   private val repository: MovieRepository = DefaultMovieRepository(),
@@ -84,17 +86,16 @@ class MovieNightViewModel(
   val uiState: StateFlow<MovieNightUiState> = _uiState.asStateFlow()
 
   init {
-    // 1. Ricarichiamo i film/serie/anime salvati sul telefono ("Da vedere", "Già visti", voti, episodi)
     val saved = storage.load()
     _uiState.update {
       it.copy(
         likedMovies = saved.watchlist,
         watchedMovies = saved.watched,
+        dislikedIds = saved.dislikedIds,
         userProgress = saved.progress,
         malUsername = saved.malUsername
       )
     }
-    // 2. Carichiamo il catalogo iniziale
     loadCatalog(MovieGenreFilter.ALL, MediaType.MOVIE)
   }
 
@@ -104,30 +105,22 @@ class MovieNightViewModel(
       LibrarySnapshot(
         watchlist = state.likedMovies,
         watched = state.watchedMovies,
+        dislikedIds = state.dislikedIds,
         progress = state.userProgress,
         malUsername = state.malUsername
       )
     )
   }
 
-  /**
-   * Cambia la sezione attiva nella barra in basso (Scopri / Da Vedere / Già Visti).
-   */
   fun selectTab(tab: AppTab) {
     _uiState.update { it.copy(selectedTab = tab) }
   }
 
-  /**
-   * Cambia il tipo di contenuto (Film 🎬, Serie TV 📺, Anime ⛩️) e aggiorna il mazzo.
-   */
   fun selectMediaType(mediaType: MediaType) {
     if (_uiState.value.selectedMediaType == mediaType && _uiState.value.deck.isNotEmpty()) return
     loadCatalog(_uiState.value.selectedGenre, mediaType)
   }
 
-  /**
-   * Carica il mazzo applicando il filtro di genere scelto.
-   */
   fun selectGenre(genre: MovieGenreFilter) {
     loadCatalog(genre, _uiState.value.selectedMediaType)
   }
@@ -143,20 +136,23 @@ class MovieNightViewModel(
           currentIndex = 0
         )
       }
-      val items = repository.getCatalog(genre, mediaType)
+      val rawItems = repository.getCatalog(genre, mediaType)
+      val state = _uiState.value
+      val excludedIds = state.dislikedIds +
+        state.likedMovies.map { it.id }.toSet() +
+        state.watchedMovies.map { it.id }.toSet()
+
+      val filteredDeck = rawItems.filterNot { it.id in excludedIds }
       _uiState.update {
         it.copy(
           isLoading = false,
-          deck = items,
+          deck = filteredDeck,
           currentIndex = 0
         )
       }
     }
   }
 
-  /**
-   * Cerca un titolo per nome interrogando IMDb (per Film/Serie) o MyAnimeList Jikan (per Anime).
-   */
   fun searchMovies(query: String) {
     _uiState.update { it.copy(searchQuery = query) }
     val currentType = _uiState.value.selectedMediaType
@@ -178,8 +174,8 @@ class MovieNightViewModel(
   }
 
   /**
-   * Azione "Mi ispira / Da Vedere" (Swipe a Destra o pulsante ❤️):
-   * aggiunge il titolo corrente alla lista "Da Vedere" (`likedMovies`) e passa al successivo.
+   * 1. SWIPE A DESTRA (➡️ / Cuore ❤️): "Mettiamolo in lista (Da Vedere)"
+   * Aggiunge il programma alla Watchlist generale (`likedMovies`) e avanza.
    */
   fun likeCurrentMovie() {
     val state = _uiState.value
@@ -199,9 +195,8 @@ class MovieNightViewModel(
   }
 
   /**
-   * Azione "Già Visto ✅" direttamente dalla scheda Swipe:
-   * segna il titolo corrente come già visto (rimuovendolo da "Da Vedere" se presente)
-   * e passa subito alla scheda successiva!
+   * 2. SWIPE VERSO L'ALTO (⬆️ / Già Visto ✅): "L'ho già visto"
+   * Aggiunge il programma a `watchedMovies` e passa subito alla scheda successiva.
    */
   fun markCurrentMovieWatched(userRating: Int? = null) {
     val state = _uiState.value
@@ -213,8 +208,68 @@ class MovieNightViewModel(
   }
 
   /**
-   * Sposta o aggiunge un titolo nella sezione "Già Visti" (Watched),
-   * salvando anche l'eventuale voto personale (1..10 ⭐).
+   * 3. SWIPE VERSO IL BASSO (⬇️ / Rimetti nel pool 🔄): "Rimettilo nel pool"
+   * Sposta la carta attuale in fondo al mazzo (`deck + movie`) così riapparirà più avanti!
+   */
+  fun putBackInPool() {
+    val state = _uiState.value
+    val movie = state.currentMovie ?: return
+    _uiState.update {
+      it.copy(
+        deck = it.deck + movie,
+        currentIndex = it.currentIndex + 1
+      )
+    }
+  }
+
+  /**
+   * 4. SWIPE A SINISTRA (⬅️ / X ✖️): "Non farmelo più vedere"
+   * Salva l'ID in `dislikedIds` (persistente su telefono) così non ti verrà mai più mostrato!
+   */
+  fun skipCurrentMovie() {
+    val state = _uiState.value
+    val movie = state.currentMovie ?: return
+    _uiState.update {
+      it.copy(
+        skippedMovies = it.skippedMovies + movie,
+        dislikedIds = it.dislikedIds + movie.id,
+        currentIndex = it.currentIndex + 1
+      )
+    }
+    persistCurrentLibrary()
+  }
+
+  /**
+   * Apre o chiude la scheda dettagliata di qualsiasi programma (Trama, Attori, Dove guardarlo, Lingue, Simili).
+   */
+  fun openProgramDetails(movie: Movie) {
+    _uiState.update { it.copy(selectedMediaForDetails = movie) }
+  }
+
+  fun closeProgramDetails() {
+    _uiState.update { it.copy(selectedMediaForDetails = null) }
+  }
+
+  /**
+   * Aggiunge direttamente un programma (es. dai "Programmi simili" o dalla scheda dettaglio) alla lista "Da Vedere".
+   */
+  fun addToWatchlist(movie: Movie) {
+    _uiState.update { state ->
+      val updatedLikes = if (state.likedMovies.any { it.id == movie.id }) {
+        state.likedMovies
+      } else {
+        listOf(movie) + state.likedMovies
+      }
+      state.copy(
+        likedMovies = updatedLikes,
+        dislikedIds = state.dislikedIds - movie.id
+      )
+    }
+    persistCurrentLibrary()
+  }
+
+  /**
+   * Sposta o aggiunge un titolo nella sezione "Già Visti" (Watched).
    */
   fun markAsWatched(movie: Movie, userRating: Int? = null) {
     _uiState.update { state ->
@@ -233,15 +288,13 @@ class MovieNightViewModel(
       state.copy(
         likedMovies = updatedWatchlist,
         watchedMovies = updatedWatched,
+        dislikedIds = state.dislikedIds - movie.id,
         userProgress = state.userProgress + (movie.id to newProg)
       )
     }
     persistCurrentLibrary()
   }
 
-  /**
-   * Riporta un titolo da "Già Visti" alla lista "Da Vedere" (Watchlist).
-   */
   fun moveBackToWatchlist(movie: Movie) {
     _uiState.update { state ->
       val updatedWatched = state.watchedMovies.filterNot { it.id == movie.id }
@@ -258,9 +311,6 @@ class MovieNightViewModel(
     persistCurrentLibrary()
   }
 
-  /**
-   * Rimuove un titolo dalla lista "Già Visti".
-   */
   fun removeFromWatched(movie: Movie) {
     _uiState.update { state ->
       state.copy(watchedMovies = state.watchedMovies.filterNot { it.id == movie.id })
@@ -268,9 +318,6 @@ class MovieNightViewModel(
     persistCurrentLibrary()
   }
 
-  /**
-   * Assegna o modifica il voto personale complessivo (da 1 a 10 stelle ⭐) a un Film, Serie TV o Anime.
-   */
   fun rateMedia(mediaId: String, rating: Int) {
     val cleanRating = rating.coerceIn(1, 10)
     _uiState.update { state ->
@@ -282,47 +329,34 @@ class MovieNightViewModel(
     persistCurrentLibrary()
   }
 
-  /**
-   * Apre il pannello "Episodi & Ratings" per una Serie TV o un Anime.
-   * Se la serie/anime non ha ancora gli episodi caricati, li richiede al Repository (es. Jikan API).
-   */
   fun openEpisodeTracker(movie: Movie) {
+    val enriched = CuratedImdbCatalog.ensureFullEpisodeMode(movie)
     _uiState.update {
       it.copy(
-        selectedMediaForEpisodes = movie,
-        isLoadingEpisodes = movie.episodes.isEmpty()
+        selectedMediaForEpisodes = enriched,
+        isLoadingEpisodes = false
       )
     }
-    if (movie.episodes.isEmpty()) {
-      viewModelScope.launch {
-        val loadedEpisodes = repository.fetchEpisodesForMedia(movie)
-        val enrichedMovie = movie.copy(episodes = loadedEpisodes)
-        _uiState.update { state ->
-          state.copy(
-            isLoadingEpisodes = false,
-            selectedMediaForEpisodes = enrichedMovie,
-            deck = state.deck.map { if (it.id == movie.id) enrichedMovie else it },
-            likedMovies = state.likedMovies.map { if (it.id == movie.id) enrichedMovie else it },
-            watchedMovies = state.watchedMovies.map { if (it.id == movie.id) enrichedMovie else it }
-          )
-        }
-        persistCurrentLibrary()
+    viewModelScope.launch {
+      val loadedEpisodes = repository.fetchEpisodesForMedia(enriched)
+      val updatedMovie = enriched.copy(episodes = loadedEpisodes)
+      _uiState.update { state ->
+        state.copy(
+          isLoadingEpisodes = false,
+          selectedMediaForEpisodes = updatedMovie,
+          deck = state.deck.map { if (it.id == movie.id) updatedMovie else it },
+          likedMovies = state.likedMovies.map { if (it.id == movie.id) updatedMovie else it },
+          watchedMovies = state.watchedMovies.map { if (it.id == movie.id) updatedMovie else it }
+        )
       }
+      persistCurrentLibrary()
     }
   }
 
-  /**
-   * Chiude il pannello "Episodi & Ratings".
-   */
   fun closeEpisodeTracker() {
     _uiState.update { it.copy(selectedMediaForEpisodes = null, isLoadingEpisodes = false) }
   }
 
-  /**
-   * Spunta o deseleziona un singolo episodio come "Visto" (☑️).
-   * Se l'utente inizia a vedere episodi di una Serie TV o Anime, l'opera viene assicurata
-   * nella sezione "Già Visti & Episodi" così può seguirne l'avanzamento!
-   */
   fun toggleEpisodeWatched(media: Movie, episodeId: String) {
     _uiState.update { state ->
       val currentProg = state.userProgress[media.id] ?: UserMediaProgress(mediaId = media.id)
@@ -347,17 +381,12 @@ class MovieNightViewModel(
     persistCurrentLibrary()
   }
 
-  /**
-   * Assegna il voto personale dell'utente (da 1 a 10 ⭐) a un singolo episodio!
-   * Quando voti un episodio, viene anche segnato automaticamente come "Visto".
-   */
   fun rateEpisode(media: Movie, episodeId: String, rating: Int) {
     val cleanRating = rating.coerceIn(1, 10)
     _uiState.update { state ->
       val currentProg = state.userProgress[media.id] ?: UserMediaProgress(mediaId = media.id)
       val updatedWatchedSet = currentProg.watchedEpisodeIds + episodeId
       val updatedEpRatings = currentProg.episodeRatings + (episodeId to cleanRating)
-      // Calcoliamo anche la media automatica dei voti dati agli episodi se il titolo non ha ancora un voto globale
       val autoMediaRating = currentProg.userRating ?: updatedEpRatings.values.average().toInt().coerceIn(1, 10)
       val newProg = currentProg.copy(
         userRating = autoMediaRating,
@@ -379,9 +408,6 @@ class MovieNightViewModel(
     persistCurrentLibrary()
   }
 
-  /**
-   * Importa la lista anime da un profilo MyAnimeList (MAL) tramite username.
-   */
   fun importFromMyAnimeList(username: String) {
     val cleanUser = username.trim()
     if (cleanUser.isEmpty()) return
@@ -439,26 +465,6 @@ class MovieNightViewModel(
     _uiState.update { it.copy(malSyncMessage = null) }
   }
 
-  /**
-   * Azione "Salta" (Swipe a Sinistra o pulsante ✖️):
-   * scarta il titolo corrente e passa al successivo.
-   */
-  fun skipCurrentMovie() {
-    val state = _uiState.value
-    val movie = state.currentMovie ?: return
-    _uiState.update {
-      it.copy(
-        skippedMovies = it.skippedMovies + movie,
-        currentIndex = it.currentIndex + 1
-      )
-    }
-  }
-
-  /**
-   * Pulsante "Scegli per me a caso!" (🎲):
-   * - Se l'utente ha già messo almeno 1 titolo nella lista "Da Vedere", pesca a sorte tra quelli!
-   * - Altrimenti pesca a sorte direttamente dal mazzo corrente filtrato.
-   */
   fun pickRandomForTonight() {
     val state = _uiState.value
     val pool = if (state.likedMovies.isNotEmpty()) {
@@ -471,9 +477,6 @@ class MovieNightViewModel(
     _uiState.update { it.copy(pickedWinner = winner) }
   }
 
-  /**
-   * Permette di scegliere direttamente un titolo specifico dalla lista "Da Vedere".
-   */
   fun chooseMovieDirectly(movie: Movie) {
     _uiState.update {
       it.copy(
@@ -483,9 +486,6 @@ class MovieNightViewModel(
     }
   }
 
-  /**
-   * Rimuove un titolo dalla lista "Da Vedere".
-   */
   fun removeFromLiked(movie: Movie) {
     _uiState.update {
       it.copy(likedMovies = it.likedMovies.filterNot { item -> item.id == movie.id })
@@ -493,30 +493,30 @@ class MovieNightViewModel(
     persistCurrentLibrary()
   }
 
-  /**
-   * Chiude la finestra del titolo vincitore.
-   */
   fun dismissWinner() {
     _uiState.update { it.copy(pickedWinner = null) }
   }
 
-  /**
-   * Apre o chiude il pannello rapido con la lista dei titoli salvati.
-   */
   fun toggleShortlistSheet(show: Boolean) {
     _uiState.update { it.copy(showShortlistSheet = show) }
   }
 
   /**
-   * Rimescola il mazzo corrente per ricominciare a scorrere.
+   * Rimescola il mazzo (e se il mazzo era finito a causa degli scarti, ricarica il catalogo).
    */
   fun reshuffleDeck() {
-    _uiState.update {
-      it.copy(
-        deck = it.deck.shuffled(),
-        currentIndex = 0,
-        skippedMovies = emptyList()
-      )
+    val state = _uiState.value
+    if (state.deck.isEmpty()) {
+      _uiState.update { it.copy(dislikedIds = emptySet(), skippedMovies = emptyList()) }
+      persistCurrentLibrary()
+      loadCatalog(state.selectedGenre, state.selectedMediaType)
+    } else {
+      _uiState.update {
+        it.copy(
+          deck = it.deck.shuffled(),
+          currentIndex = 0
+        )
+      }
     }
   }
 }

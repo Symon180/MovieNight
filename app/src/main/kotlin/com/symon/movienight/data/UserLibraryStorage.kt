@@ -11,24 +11,22 @@ import org.json.JSONObject
 
 /**
  * Fotografia completa dei dati salvati dall'utente sul telefono:
- * - `watchlist`: i titoli "Da Vedere" (salvati con Swipe a destra o importati da MAL "Plan to Watch")
- * - `watched`: i titoli "Già Visti" (o in corso di visione)
- * - `progress`: mappa `mediaId -> UserMediaProgress` con il voto personale al titolo,
- *   gli episodi spuntati come visti e i voti dati ai singoli episodi
+ * - `watchlist`: i titoli "Da Vedere" (Swipe a Destra ❤️, lista illimitata)
+ * - `watched`: i titoli "Già Visti" (Swipe verso l'Alto ⬆️)
+ * - `dislikedIds`: ID dei titoli scartati per sempre (Swipe a Sinistra ⬅️ ✖️ "non farmelo più vedere")
+ * - `progress`: mappa `mediaId -> UserMediaProgress` con voti personali ed episodi visti/votati
  * - `malUsername`: l'eventuale username MyAnimeList collegato dall'utente
  */
 data class LibrarySnapshot(
   val watchlist: List<Movie> = emptyList(),
   val watched: List<Movie> = emptyList(),
+  val dislikedIds: Set<String> = emptySet(),
   val progress: Map<String, UserMediaProgress> = emptyMap(),
   val malUsername: String = ""
 )
 
 /**
  * Interfaccia per il salvataggio persistente della libreria personale.
- * Usare un'interfaccia ci permette di avere:
- * - `SharedPreferencesLibraryStorage` sul telefono Android reale
- * - `InMemoryLibraryStorage` nei test unitari veloci su PC
  */
 interface LibraryStorage {
   fun load(): LibrarySnapshot
@@ -36,7 +34,7 @@ interface LibraryStorage {
 }
 
 /**
- * Implementazione in memoria (usata di default nei test o quando non c'è Context Android).
+ * Implementazione in memoria (usata nei test unitari).
  */
 class InMemoryLibraryStorage(
   initialSnapshot: LibrarySnapshot = LibrarySnapshot()
@@ -52,8 +50,6 @@ class InMemoryLibraryStorage(
 
 /**
  * Salva in modo permanente su disco nel telefono Android tramite `SharedPreferences` in formato JSON.
- * Così quando chiudi e riapri MovieNight ritrovi tutti i tuoi film/serie/anime "Da vedere",
- * "Già visti", i tuoi voti e gli episodi spuntati!
  */
 class SharedPreferencesLibraryStorage(context: Context) : LibraryStorage {
 
@@ -68,11 +64,20 @@ class SharedPreferencesLibraryStorage(context: Context) : LibraryStorage {
       val root = JSONObject(rawJson)
       val watchlist = parseMoviesArray(root.optJSONArray("watchlist"))
       val watched = parseMoviesArray(root.optJSONArray("watched"))
+      val dislikedArr = root.optJSONArray("dislikedIds")
+      val dislikedSet = mutableSetOf<String>()
+      if (dislikedArr != null) {
+        for (i in 0 until dislikedArr.length()) {
+          val idStr = dislikedArr.optString(i)
+          if (idStr.isNotBlank()) dislikedSet.add(idStr)
+        }
+      }
       val progress = parseProgressMap(root.optJSONObject("progress"))
       val malUser = root.optString("malUsername", "")
       LibrarySnapshot(
         watchlist = watchlist,
         watched = watched,
+        dislikedIds = dislikedSet,
         progress = progress,
         malUsername = malUser
       )
@@ -86,6 +91,7 @@ class SharedPreferencesLibraryStorage(context: Context) : LibraryStorage {
       val root = JSONObject().apply {
         put("watchlist", serializeMoviesArray(snapshot.watchlist))
         put("watched", serializeMoviesArray(snapshot.watched))
+        put("dislikedIds", JSONArray(snapshot.dislikedIds.toList()))
         put("progress", serializeProgressMap(snapshot.progress))
         put("malUsername", snapshot.malUsername)
       }
@@ -114,6 +120,9 @@ class SharedPreferencesLibraryStorage(context: Context) : LibraryStorage {
         if (m.malId != null) put("malId", m.malId)
         put("totalSeasons", m.totalSeasons)
         put("totalEpisodes", m.totalEpisodes)
+        put("cast", JSONArray(m.cast))
+        put("streamingPlatforms", JSONArray(m.streamingPlatforms))
+        put("availableLanguages", m.availableLanguages)
         val epArray = JSONArray()
         for (ep in m.episodes) {
           epArray.put(
@@ -141,14 +150,10 @@ class SharedPreferencesLibraryStorage(context: Context) : LibraryStorage {
       val obj = arr.optJSONObject(i) ?: continue
       val id = obj.optString("id").takeIf { it.isNotBlank() } ?: continue
       val title = obj.optString("title").takeIf { it.isNotBlank() } ?: continue
-      val genresArr = obj.optJSONArray("genres")
-      val genres = mutableListOf<String>()
-      if (genresArr != null) {
-        for (g in 0 until genresArr.length()) {
-          val gStr = genresArr.optString(g)
-          if (gStr.isNotBlank()) genres.add(gStr)
-        }
-      }
+      val genres = optStringList(obj.optJSONArray("genres"))
+      val cast = optStringList(obj.optJSONArray("cast"))
+      val platforms = optStringList(obj.optJSONArray("streamingPlatforms"))
+
       val epArr = obj.optJSONArray("episodes")
       val episodes = mutableListOf<Episode>()
       if (epArr != null) {
@@ -187,11 +192,24 @@ class SharedPreferencesLibraryStorage(context: Context) : LibraryStorage {
           malId = malIdVal,
           totalSeasons = obj.optInt("totalSeasons", 1),
           totalEpisodes = obj.optInt("totalEpisodes", 1),
-          episodes = episodes
+          episodes = episodes,
+          cast = cast,
+          streamingPlatforms = platforms,
+          availableLanguages = obj.optString("availableLanguages", "")
         )
       )
     }
     return result
+  }
+
+  private fun optStringList(arr: JSONArray?): List<String> {
+    if (arr == null) return emptyList()
+    val list = mutableListOf<String>()
+    for (i in 0 until arr.length()) {
+      val s = arr.optString(i)
+      if (s.isNotBlank()) list.add(s)
+    }
+    return list
   }
 
   private fun serializeProgressMap(map: Map<String, UserMediaProgress>): JSONObject {

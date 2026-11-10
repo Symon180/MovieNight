@@ -29,8 +29,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
@@ -41,8 +43,13 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.LocalMovies
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Style
@@ -56,7 +63,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -76,6 +82,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -110,7 +117,6 @@ import com.symon.movienight.data.CuratedImdbCatalog
 import com.symon.movienight.data.DefaultMovieRepository
 import com.symon.movienight.data.SharedPreferencesLibraryStorage
 import com.symon.movienight.model.AppTab
-import com.symon.movienight.model.Episode
 import com.symon.movienight.model.MediaSource
 import com.symon.movienight.model.MediaType
 import com.symon.movienight.model.Movie
@@ -162,7 +168,11 @@ fun MovieNightRoute() {
     onSearchQueryChange = viewModel::searchMovies,
     onSwipeLike = viewModel::likeCurrentMovie,
     onSwipeSkip = viewModel::skipCurrentMovie,
-    onMarkCurrentWatched = { viewModel.markCurrentMovieWatched(null) },
+    onSwipeUpWatched = { viewModel.markCurrentMovieWatched(null) },
+    onSwipeDownPool = viewModel::putBackInPool,
+    onOpenDetails = viewModel::openProgramDetails,
+    onCloseDetails = viewModel::closeProgramDetails,
+    onAddToWatchlist = viewModel::addToWatchlist,
     onMarkWatched = viewModel::markAsWatched,
     onMoveToWatchlist = viewModel::moveBackToWatchlist,
     onRemoveWatched = viewModel::removeFromWatched,
@@ -199,7 +209,11 @@ fun MovieNightScreen(
   modifier: Modifier = Modifier,
   onSelectTab: (AppTab) -> Unit = {},
   onSelectMediaType: (MediaType) -> Unit = {},
-  onMarkCurrentWatched: () -> Unit = {},
+  onSwipeUpWatched: () -> Unit = {},
+  onSwipeDownPool: () -> Unit = {},
+  onOpenDetails: (Movie) -> Unit = {},
+  onCloseDetails: () -> Unit = {},
+  onAddToWatchlist: (Movie) -> Unit = {},
   onMarkWatched: (Movie, Int?) -> Unit = { _, _ -> },
   onMoveToWatchlist: (Movie) -> Unit = {},
   onRemoveWatched: (Movie) -> Unit = {},
@@ -242,53 +256,55 @@ fun MovieNightScreen(
               Text(
                 text = "MovieNight",
                 fontWeight = FontWeight.Bold,
-                fontSize = 20.sp
+                fontSize = 19.sp
               )
               Text(
                 text = when (uiState.selectedTab) {
-                  AppTab.DISCOVER -> "Film, Serie TV & Anime MyAnimeList"
+                  AppTab.DISCOVER -> "Tocca una scheda per tutti i dettagli"
                   AppTab.WATCHLIST -> "La tua lista Da Vedere (${uiState.likedMovies.size})"
-                  AppTab.WATCHED -> "Diario Già Visti & Ratings Episodi (${uiState.watchedMovies.size})"
+                  AppTab.WATCHED -> "Diario Già Visti (${uiState.watchedMovies.size})"
                 },
-                fontSize = 12.sp,
+                fontSize = 11.sp,
                 color = TextSecondary
               )
             }
           }
         },
         actions = {
+          // Pulsante "Sorteggia 🎲" posizionato in alto così NON copre mai i tasti dello Swipe!
+          Surface(
+            color = ImdbGold,
+            shape = RoundedCornerShape(50),
+            modifier = Modifier
+              .padding(end = 4.dp)
+              .clickable { onPickRandom() }
+          ) {
+            Row(
+              verticalAlignment = Alignment.CenterVertically,
+              modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+              Icon(
+                imageVector = Icons.Default.Casino,
+                contentDescription = "Sorteggia",
+                tint = Color.Black,
+                modifier = Modifier.size(16.dp)
+              )
+              Spacer(modifier = Modifier.width(4.dp))
+              Text(
+                text = "Sorteggia",
+                color = Color.Black,
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = 12.sp
+              )
+            }
+          }
+
           if (uiState.selectedTab == AppTab.DISCOVER) {
             IconButton(onClick = { showSearchBar = !showSearchBar }) {
               Icon(
                 imageVector = Icons.Default.Search,
                 contentDescription = "Cerca titolo",
                 tint = if (showSearchBar) ImdbGold else TextPrimary
-              )
-            }
-          }
-          IconButton(
-            onClick = { onSelectTab(AppTab.WATCHLIST) },
-            modifier = Modifier.padding(end = 8.dp)
-          ) {
-            BadgedBox(
-              badge = {
-                if (uiState.likedMovies.isNotEmpty()) {
-                  Badge(
-                    containerColor = ImdbGold,
-                    contentColor = Color.Black
-                  ) {
-                    Text(
-                      text = uiState.likedMovies.size.toString(),
-                      fontWeight = FontWeight.Bold
-                    )
-                  }
-                }
-              }
-            ) {
-              Icon(
-                imageVector = Icons.Default.Favorite,
-                contentDescription = "Lista Da Vedere",
-                tint = if (uiState.likedMovies.isNotEmpty()) LikeGreen else TextPrimary
               )
             }
           }
@@ -302,32 +318,6 @@ fun MovieNightScreen(
         watchedCount = uiState.watchedMovies.size,
         onSelectTab = onSelectTab
       )
-    },
-    floatingActionButton = {
-      if (uiState.selectedTab == AppTab.DISCOVER || uiState.selectedTab == AppTab.WATCHLIST) {
-        ExtendedFloatingActionButton(
-          onClick = onPickRandom,
-          containerColor = ImdbGold,
-          contentColor = Color.Black,
-          icon = {
-            Icon(
-              imageVector = Icons.Default.Casino,
-              contentDescription = null
-            )
-          },
-          text = {
-            val label = if (uiState.likedMovies.isNotEmpty()) {
-              "Sorteggia tra i ${uiState.likedMovies.size} Da Vedere!"
-            } else {
-              "Scegli per me a caso!"
-            }
-            Text(
-              text = label,
-              fontWeight = FontWeight.ExtraBold
-            )
-          }
-        )
-      }
     }
   ) { innerPadding ->
     Box(
@@ -343,9 +333,11 @@ fun MovieNightScreen(
             onSelectMediaType = onSelectMediaType,
             onSelectGenre = onSelectGenre,
             onSearchQueryChange = onSearchQueryChange,
-            onSwipeLike = onSwipeLike,
-            onSwipeSkip = onSwipeSkip,
-            onMarkCurrentWatched = onMarkCurrentWatched,
+            onSwipeRightLike = onSwipeLike,
+            onSwipeLeftDislike = onSwipeSkip,
+            onSwipeUpWatched = onSwipeUpWatched,
+            onSwipeDownPool = onSwipeDownPool,
+            onOpenDetails = onOpenDetails,
             onOpenEpisodes = onOpenEpisodes,
             onReshuffle = onReshuffle,
             onPickRandom = onPickRandom
@@ -356,7 +348,8 @@ fun MovieNightScreen(
           WatchlistSection(
             watchlist = uiState.likedMovies,
             userProgress = uiState.userProgress,
-            onChooseForTonight = onChooseDirectly,
+            onOpenDetails = onOpenDetails,
+            onPickRandom = onPickRandom,
             onMarkWatched = { movie -> onMarkWatched(movie, null) },
             onOpenEpisodes = onOpenEpisodes,
             onRemoveFromWatchlist = onRemoveLiked,
@@ -372,6 +365,7 @@ fun MovieNightScreen(
             malUsername = uiState.malUsername,
             isSyncingMal = uiState.isSyncingMal,
             malSyncMessage = uiState.malSyncMessage,
+            onOpenDetails = onOpenDetails,
             onRateMedia = onRateMedia,
             onOpenEpisodes = onOpenEpisodes,
             onMoveToWatchlist = onMoveToWatchlist,
@@ -391,32 +385,35 @@ fun MovieNightScreen(
       movie = winner,
       onDismiss = onDismissWinner,
       onPickAnother = onPickRandom,
+      onOpenDetails = {
+        onDismissWinner()
+        onOpenDetails(winner)
+      },
       onMarkWatched = {
         onMarkWatched(winner, null)
         onDismissWinner()
-      },
+      }
+    )
+  }
+
+  // SCHEDA DETTAGLIO PROGRAMMA APRIBILE (Trama, Attori, Dove guardarlo con Redirect, Lingue, Simili)
+  uiState.selectedMediaForDetails?.let { media ->
+    ProgramDetailSheet(
+      media = media,
+      isInWatchlist = uiState.likedMovies.any { it.id == media.id },
+      isWatched = uiState.watchedMovies.any { it.id == media.id },
+      onDismiss = onCloseDetails,
+      onAddToWatchlist = { onAddToWatchlist(media) },
+      onMarkWatched = { onMarkWatched(media, null) },
       onOpenEpisodes = {
-        onDismissWinner()
-        onOpenEpisodes(winner)
-      }
+        onCloseDetails()
+        onOpenEpisodes(media)
+      },
+      onSelectSimilar = { similar -> onOpenDetails(similar) }
     )
   }
 
-  // BottomSheet legacy rapido se invocato
-  if (uiState.showShortlistSheet) {
-    ShortlistBottomSheet(
-      likedMovies = uiState.likedMovies,
-      onDismiss = { onToggleShortlist(false) },
-      onRemoveMovie = onRemoveLiked,
-      onChooseMovie = onChooseDirectly,
-      onPickRandomFromLikes = {
-        onToggleShortlist(false)
-        onPickRandom()
-      }
-    )
-  }
-
-  // BottomSheet "Episodi & Ratings" per Serie TV e Anime!
+  // BottomSheet "Episodi & Ratings" per Serie TV e Anime (senza limite di 6!)
   uiState.selectedMediaForEpisodes?.let { media ->
     EpisodeTrackerSheet(
       media = media,
@@ -424,18 +421,11 @@ fun MovieNightScreen(
       progress = uiState.userProgress[media.id] ?: UserMediaProgress(mediaId = media.id),
       onDismiss = onCloseEpisodes,
       onToggleEpisodeWatched = { epId -> onToggleEpisodeWatched(media, epId) },
-      onRateEpisode = { epId, stars -> onRateEpisode(media, epId, stars) },
-      onRateWholeSeries = { stars -> onRateMedia(media.id, stars) }
+      onRateEpisode = { epId, stars -> onRateEpisode(media, epId, stars) }
     )
   }
 }
 
-/**
- * Barra di navigazione inferiore a 3 sezioni:
- * 1. Scopri (Swipe)
- * 2. Da Vedere (Watchlist)
- * 3. Già Visti & Episodi (Watched)
- */
 @Composable
 private fun MovieNightBottomBar(
   selectedTab: AppTab,
@@ -518,7 +508,7 @@ private fun MovieNightBottomBar(
 }
 
 /**
- * Sezione 1: SCOPRI (Swipe stile Tinder per Film, Serie TV e Anime MyAnimeList).
+ * Sezione 1: SCOPRI (Swipe a 4 direzioni + Scheda apribile al tocco).
  */
 @Composable
 private fun DiscoverSection(
@@ -527,21 +517,21 @@ private fun DiscoverSection(
   onSelectMediaType: (MediaType) -> Unit,
   onSelectGenre: (MovieGenreFilter) -> Unit,
   onSearchQueryChange: (String) -> Unit,
-  onSwipeLike: () -> Unit,
-  onSwipeSkip: () -> Unit,
-  onMarkCurrentWatched: () -> Unit,
+  onSwipeRightLike: () -> Unit,
+  onSwipeLeftDislike: () -> Unit,
+  onSwipeUpWatched: () -> Unit,
+  onSwipeDownPool: () -> Unit,
+  onOpenDetails: (Movie) -> Unit,
   onOpenEpisodes: (Movie) -> Unit,
   onReshuffle: () -> Unit,
   onPickRandom: () -> Unit
 ) {
   Column(modifier = Modifier.fillMaxSize()) {
-    // Selettore principale: Film 🎬 | Serie TV 📺 | Anime ⛩️
     MediaTypeSelectorRow(
       selectedType = uiState.selectedMediaType,
       onSelectType = onSelectMediaType
     )
 
-    // Barra di ricerca live (IMDb per Film/Serie, MyAnimeList Jikan per Anime)
     AnimatedVisibility(visible = showSearchBar) {
       val searchPlaceholder = when (uiState.selectedMediaType) {
         MediaType.MOVIE -> "Cerca film o attore su IMDb..."
@@ -576,18 +566,30 @@ private fun DiscoverSection(
       )
     }
 
-    // Barra orizzontale con i filtri di genere
     GenreFilterRow(
       selectedGenre = uiState.selectedGenre,
       onSelectGenre = onSelectGenre
     )
 
-    // Area centrale con il mazzo di schede (Swipe Deck)
+    // Legenda compatta delle 4 direzioni di Swipe
+    Row(
+      modifier = Modifier
+        .fillMaxWidth()
+        .padding(horizontal = 16.dp, vertical = 2.dp),
+      horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+      Text("⬅️✖️ Scarta", color = SkipRed, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+      Text("⬇️🔄 Nel pool", color = MalBlueLight, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+      Text("⬆️✅ Già visto", color = ImdbGold, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+      Text("➡️❤️ In lista", color = LikeGreen, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+    }
+
+    // Area centrale con il mazzo di schede (Swipe Deck + 4 Pulsanti liberi sotto)
     Box(
       modifier = Modifier
         .weight(1f)
         .fillMaxWidth()
-        .padding(horizontal = 16.dp, vertical = 6.dp),
+        .padding(horizontal = 16.dp, vertical = 4.dp),
       contentAlignment = Alignment.Center
     ) {
       when {
@@ -614,36 +616,41 @@ private fun DiscoverSection(
             MovieCardContent(
               movie = nextMovie,
               dragOffsetX = 0f,
+              dragOffsetY = 0f,
+              onOpenDetails = {},
               onOpenEpisodes = {},
               modifier = Modifier
                 .fillMaxSize()
-                .padding(bottom = 84.dp)
+                .padding(bottom = 86.dp)
                 .scale(0.94f)
                 .alpha(0.55f)
             )
           }
 
-          // Carta attiva in primo piano trascinabile col dito
+          // Carta attiva in primo piano trascinabile in TUTTE E 4 LE DIREZIONI e cliccabile!
           val activeMovie = uiState.currentMovie!!
           SwipeableMovieCard(
             movie = activeMovie,
-            onSwipedRight = onSwipeLike,
-            onSwipedLeft = onSwipeSkip,
+            onSwipedRight = onSwipeRightLike,
+            onSwipedLeft = onSwipeLeftDislike,
+            onSwipedUp = onSwipeUpWatched,
+            onSwipedDown = onSwipeDownPool,
+            onCardClick = { onOpenDetails(activeMovie) },
             onOpenEpisodes = { onOpenEpisodes(activeMovie) },
             modifier = Modifier
               .fillMaxSize()
-              .padding(bottom = 84.dp)
+              .padding(bottom = 86.dp)
           )
 
-          // Pulsanti fisici "Salta" (✖️), "Già Visto" (✅) e "Da Vedere" (❤️) in basso
+          // I 4 Pulsanti fisici sotto la carta (non più coperti da nessun testo!)
           ActionButtonsRow(
-            remainingCount = uiState.remainingInDeck,
-            onSkip = onSwipeSkip,
-            onMarkWatched = onMarkCurrentWatched,
-            onLike = onSwipeLike,
+            onDislikeForever = onSwipeLeftDislike,
+            onPutBackInPool = onSwipeDownPool,
+            onMarkWatched = onSwipeUpWatched,
+            onLikeToWatchlist = onSwipeRightLike,
             modifier = Modifier
               .align(Alignment.BottomCenter)
-              .padding(bottom = 8.dp)
+              .padding(bottom = 4.dp)
           )
         }
 
@@ -659,9 +666,6 @@ private fun DiscoverSection(
   }
 }
 
-/**
- * Selettore a 3 pulsanti per scegliere tra Film 🎬, Serie TV 📺 e Anime ⛩️ (MyAnimeList).
- */
 @Composable
 private fun MediaTypeSelectorRow(
   selectedType: MediaType,
@@ -695,7 +699,7 @@ private fun MediaTypeSelectorRow(
           fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.SemiBold,
           fontSize = 13.sp,
           textAlign = TextAlign.Center,
-          modifier = Modifier.padding(vertical = 9.dp, horizontal = 6.dp)
+          modifier = Modifier.padding(vertical = 8.dp, horizontal = 6.dp)
         )
       }
     }
@@ -740,7 +744,8 @@ private fun GenreFilterRow(
 }
 
 /**
- * Gestisce il gesto di trascinamento (Swipe a destra o a sinistra) con fisica a molla.
+ * Gestisce il gesto di trascinamento (Swipe in 4 direzioni: Destra, Sinistra, Alto, Basso)
+ * e il tocco sulla scheda per aprire i dettagli completi!
  */
 @Composable
 fun SwipeableMovieCard(
@@ -748,48 +753,72 @@ fun SwipeableMovieCard(
   onSwipedRight: () -> Unit,
   onSwipedLeft: () -> Unit,
   modifier: Modifier = Modifier,
+  onSwipedUp: () -> Unit = {},
+  onSwipedDown: () -> Unit = {},
+  onCardClick: () -> Unit = {},
   onOpenEpisodes: () -> Unit = {}
 ) {
   val scope = rememberCoroutineScope()
   val offsetX = remember(movie.id) { Animatable(0f) }
-  val swipeThreshold = 260f
+  val offsetY = remember(movie.id) { Animatable(0f) }
+  val horizontalThreshold = 220f
+  val verticalThreshold = 200f
 
   Box(
     modifier = modifier
-      .offset { IntOffset(offsetX.value.roundToInt(), 0) }
-      .rotate(offsetX.value / 28f)
+      .offset { IntOffset(offsetX.value.roundToInt(), offsetY.value.roundToInt()) }
+      .rotate(offsetX.value / 30f)
+      .clickable { onCardClick() }
       .pointerInput(movie.id) {
         detectDragGestures(
           onDragEnd = {
             scope.launch {
-              when {
-                offsetX.value > swipeThreshold -> {
-                  offsetX.animateTo(1200f, tween(220))
-                  onSwipedRight()
+              val dx = offsetX.value
+              val dy = offsetY.value
+              if (abs(dx) >= abs(dy)) {
+                when {
+                  dx > horizontalThreshold -> {
+                    offsetX.animateTo(1200f, tween(200))
+                    onSwipedRight()
+                  }
+                  dx < -horizontalThreshold -> {
+                    offsetX.animateTo(-1200f, tween(200))
+                    onSwipedLeft()
+                  }
+                  else -> {
+                    launch { offsetX.animateTo(0f, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow)) }
+                    launch { offsetY.animateTo(0f, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow)) }
+                  }
                 }
-                offsetX.value < -swipeThreshold -> {
-                  offsetX.animateTo(-1200f, tween(220))
-                  onSwipedLeft()
-                }
-                else -> {
-                  offsetX.animateTo(
-                    targetValue = 0f,
-                    animationSpec = spring(
-                      dampingRatio = Spring.DampingRatioMediumBouncy,
-                      stiffness = Spring.StiffnessLow
-                    )
-                  )
+              } else {
+                when {
+                  dy < -verticalThreshold -> {
+                    offsetY.animateTo(-1200f, tween(200))
+                    onSwipedUp()
+                  }
+                  dy > verticalThreshold -> {
+                    offsetY.animateTo(1200f, tween(200))
+                    onSwipedDown()
+                  }
+                  else -> {
+                    launch { offsetX.animateTo(0f, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow)) }
+                    launch { offsetY.animateTo(0f, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow)) }
+                  }
                 }
               }
             }
           },
           onDragCancel = {
-            scope.launch { offsetX.animateTo(0f, tween(200)) }
+            scope.launch {
+              launch { offsetX.animateTo(0f, tween(180)) }
+              launch { offsetY.animateTo(0f, tween(180)) }
+            }
           },
           onDrag = { change, dragAmount ->
             change.consume()
             scope.launch {
               offsetX.snapTo(offsetX.value + dragAmount.x)
+              offsetY.snapTo(offsetY.value + dragAmount.y)
             }
           }
         )
@@ -798,6 +827,8 @@ fun SwipeableMovieCard(
     MovieCardContent(
       movie = movie,
       dragOffsetX = offsetX.value,
+      dragOffsetY = offsetY.value,
+      onOpenDetails = onCardClick,
       onOpenEpisodes = onOpenEpisodes,
       modifier = Modifier.fillMaxSize()
     )
@@ -810,6 +841,8 @@ fun MovieCardContent(
   movie: Movie,
   dragOffsetX: Float,
   modifier: Modifier = Modifier,
+  dragOffsetY: Float = 0f,
+  onOpenDetails: () -> Unit = {},
   onOpenEpisodes: () -> Unit = {}
 ) {
   val isMal = movie.source == MediaSource.MYANIMELIST
@@ -822,7 +855,6 @@ fun MovieCardContent(
     border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
   ) {
     Box(modifier = Modifier.fillMaxSize()) {
-      // Sfondo decorativo + Locandina ufficiale IMDb / MyAnimeList caricata con Coil
       Box(
         modifier = Modifier
           .fillMaxSize()
@@ -847,7 +879,6 @@ fun MovieCardContent(
         )
       }
 
-      // Sfumatura scura dal basso per rendere sempre leggibili titolo, voto e trama
       Box(
         modifier = Modifier
           .fillMaxSize()
@@ -855,7 +886,7 @@ fun MovieCardContent(
             Brush.verticalGradient(
               0.0f to Color.Black.copy(alpha = 0.30f),
               0.35f to Color.Transparent,
-              0.60f to Color.Black.copy(alpha = 0.85f),
+              0.58f to Color.Black.copy(alpha = 0.86f),
               1.0f to Color(0xFF0A0C10)
             )
           )
@@ -869,23 +900,18 @@ fun MovieCardContent(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
       ) {
-        Row(
-          horizontalArrangement = Arrangement.spacedBy(6.dp),
-          verticalAlignment = Alignment.CenterVertically
+        Surface(
+          color = if (isMal) MalBlue else Color.Black.copy(alpha = 0.78f),
+          shape = RoundedCornerShape(50),
+          border = BorderStroke(1.dp, if (isMal) MalBlueLight else ImdbGold.copy(alpha = 0.5f))
         ) {
-          Surface(
-            color = if (isMal) MalBlue else Color.Black.copy(alpha = 0.78f),
-            shape = RoundedCornerShape(50),
-            border = BorderStroke(1.dp, if (isMal) MalBlueLight else ImdbGold.copy(alpha = 0.5f))
-          ) {
-            Text(
-              text = if (movie.moodTag.isNotBlank()) movie.moodTag else movie.mediaType.badgeLabel,
-              color = if (isMal) Color.White else ImdbGold,
-              fontSize = 12.sp,
-              fontWeight = FontWeight.SemiBold,
-              modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-            )
-          }
+          Text(
+            text = if (movie.moodTag.isNotBlank()) movie.moodTag else movie.mediaType.badgeLabel,
+            color = if (isMal) Color.White else ImdbGold,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+          )
         }
 
         Surface(
@@ -919,57 +945,64 @@ fun MovieCardContent(
         }
       }
 
-      // Timbro visivo "DA VEDERE ❤️" o "SALTA ✖" durante il trascinamento
-      val swipeProgress = (abs(dragOffsetX) / 220f).coerceIn(0f, 1f)
-      if (dragOffsetX > 40f) {
-        Surface(
-          color = LikeGreen.copy(alpha = 0.2f * swipeProgress),
-          border = BorderStroke(3.dp, LikeGreen.copy(alpha = swipeProgress)),
-          shape = RoundedCornerShape(12.dp),
+      // Timbri visivi per tutte e 4 le direzioni di Swipe!
+      val isHorizontalDominant = abs(dragOffsetX) >= abs(dragOffsetY)
+      if (isHorizontalDominant && dragOffsetX > 40f) {
+        val alpha = (abs(dragOffsetX) / 200f).coerceIn(0f, 1f)
+        SwipeStamp(
+          text = "IN LISTA ❤️",
+          color = LikeGreen,
+          alpha = alpha,
+          rotation = -12f,
           modifier = Modifier
             .align(Alignment.TopStart)
             .padding(top = 72.dp, start = 24.dp)
-            .rotate(-12f)
-        ) {
-          Text(
-            text = "DA VEDERE ❤️",
-            color = LikeGreen.copy(alpha = swipeProgress),
-            fontWeight = FontWeight.ExtraBold,
-            fontSize = 20.sp,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-          )
-        }
-      } else if (dragOffsetX < -40f) {
-        Surface(
-          color = SkipRed.copy(alpha = 0.2f * swipeProgress),
-          border = BorderStroke(3.dp, SkipRed.copy(alpha = swipeProgress)),
-          shape = RoundedCornerShape(12.dp),
+        )
+      } else if (isHorizontalDominant && dragOffsetX < -40f) {
+        val alpha = (abs(dragOffsetX) / 200f).coerceIn(0f, 1f)
+        SwipeStamp(
+          text = "MAI PIÙ ✖",
+          color = SkipRed,
+          alpha = alpha,
+          rotation = 12f,
           modifier = Modifier
             .align(Alignment.TopEnd)
             .padding(top = 72.dp, end = 24.dp)
-            .rotate(12f)
-        ) {
-          Text(
-            text = "SALTA ✖",
-            color = SkipRed.copy(alpha = swipeProgress),
-            fontWeight = FontWeight.ExtraBold,
-            fontSize = 20.sp,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-          )
-        }
+        )
+      } else if (!isHorizontalDominant && dragOffsetY < -40f) {
+        val alpha = (abs(dragOffsetY) / 180f).coerceIn(0f, 1f)
+        SwipeStamp(
+          text = "GIÀ VISTO ✅",
+          color = ImdbGold,
+          alpha = alpha,
+          rotation = 0f,
+          modifier = Modifier
+            .align(Alignment.Center)
+        )
+      } else if (!isHorizontalDominant && dragOffsetY > 40f) {
+        val alpha = (abs(dragOffsetY) / 180f).coerceIn(0f, 1f)
+        SwipeStamp(
+          text = "RIMETTI NEL POOL 🔄",
+          color = MalBlueLight,
+          alpha = alpha,
+          rotation = 0f,
+          modifier = Modifier
+            .align(Alignment.TopCenter)
+            .padding(top = 80.dp)
+        )
       }
 
-      // Dettagli del titolo nella parte inferiore della scheda
+      // Dettagli del programma nella parte inferiore della scheda
       Column(
         modifier = Modifier
           .align(Alignment.BottomStart)
           .fillMaxWidth()
-          .padding(20.dp)
+          .padding(18.dp)
       ) {
         Text(
           text = movie.title,
           color = TextPrimary,
-          fontSize = 24.sp,
+          fontSize = 23.sp,
           fontWeight = FontWeight.ExtraBold,
           maxLines = 2,
           overflow = TextOverflow.Ellipsis
@@ -978,9 +1011,9 @@ fun MovieCardContent(
         Spacer(modifier = Modifier.height(4.dp))
 
         Text(
-          text = "${movie.year}  •  ${movie.formattedRuntime}  •  ${movie.director}",
+          text = "${movie.year}  •  ${movie.formattedRuntime}  •  ${movie.resolvedDirectorOrStudio}",
           color = if (isMal) MalBlueLight else ImdbGold,
-          fontSize = 13.sp,
+          fontSize = 12.sp,
           fontWeight = FontWeight.Medium,
           maxLines = 1,
           overflow = TextOverflow.Ellipsis
@@ -988,7 +1021,7 @@ fun MovieCardContent(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Pillole dei generi + Pulsante rapido "Episodi & Ratings" per Serie TV e Anime
+        // Pillole dei generi + Pulsanti "Info & Streaming" e "Episodi"
         Row(
           modifier = Modifier.fillMaxWidth(),
           horizontalArrangement = Arrangement.SpaceBetween,
@@ -999,9 +1032,9 @@ fun MovieCardContent(
             verticalArrangement = Arrangement.spacedBy(6.dp),
             modifier = Modifier.weight(1f)
           ) {
-            movie.genres.take(3).forEach { genre ->
+            movie.genres.forEach { genre ->
               Surface(
-                color = Color.White.copy(alpha = 0.12f),
+                color = Color.White.copy(alpha = 0.14f),
                 shape = RoundedCornerShape(8.dp)
               ) {
                 Text(
@@ -1009,36 +1042,62 @@ fun MovieCardContent(
                   color = TextPrimary,
                   fontSize = 11.sp,
                   fontWeight = FontWeight.SemiBold,
-                  modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                  modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
                 )
               }
             }
           }
 
-          if (movie.isEpisodic) {
+          Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (movie.isEpisodic) {
+              Surface(
+                color = ImdbGold.copy(alpha = 0.2f),
+                shape = RoundedCornerShape(10.dp),
+                border = BorderStroke(1.dp, ImdbGold),
+                modifier = Modifier.clickable { onOpenEpisodes() }
+              ) {
+                Row(
+                  verticalAlignment = Alignment.CenterVertically,
+                  modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                ) {
+                  Icon(
+                    imageVector = Icons.AutoMirrored.Filled.FormatListBulleted,
+                    contentDescription = null,
+                    tint = ImdbGold,
+                    modifier = Modifier.size(14.dp)
+                  )
+                  Spacer(modifier = Modifier.width(4.dp))
+                  Text(
+                    text = "Episodi",
+                    color = ImdbGold,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                  )
+                }
+              }
+            }
+
             Surface(
-              color = ImdbGold.copy(alpha = 0.18f),
+              color = CinemaSurface.copy(alpha = 0.9f),
               shape = RoundedCornerShape(10.dp),
-              border = BorderStroke(1.dp, ImdbGold.copy(alpha = 0.7f)),
-              modifier = Modifier
-                .padding(start = 8.dp)
-                .clickable { onOpenEpisodes() }
+              border = BorderStroke(1.dp, Color.White.copy(alpha = 0.35f)),
+              modifier = Modifier.clickable { onOpenDetails() }
             ) {
               Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
               ) {
                 Icon(
-                  imageVector = Icons.AutoMirrored.Filled.FormatListBulleted,
-                  contentDescription = null,
-                  tint = ImdbGold,
-                  modifier = Modifier.size(15.dp)
+                  imageVector = Icons.Default.Info,
+                  contentDescription = "Apri scheda",
+                  tint = TextPrimary,
+                  modifier = Modifier.size(14.dp)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                  text = "Episodi ⭐",
-                  color = ImdbGold,
-                  fontSize = 12.sp,
+                  text = "Scheda",
+                  color = TextPrimary,
+                  fontSize = 11.sp,
                   fontWeight = FontWeight.Bold
                 )
               }
@@ -1052,7 +1111,7 @@ fun MovieCardContent(
           text = movie.plot,
           color = TextSecondary,
           fontSize = 13.sp,
-          lineHeight = 19.sp,
+          lineHeight = 18.sp,
           maxLines = 3,
           overflow = TextOverflow.Ellipsis
         )
@@ -1062,11 +1121,42 @@ fun MovieCardContent(
 }
 
 @Composable
+private fun SwipeStamp(
+  text: String,
+  color: Color,
+  alpha: Float,
+  rotation: Float,
+  modifier: Modifier = Modifier
+) {
+  Surface(
+    color = color.copy(alpha = 0.22f * alpha),
+    border = BorderStroke(3.dp, color.copy(alpha = alpha)),
+    shape = RoundedCornerShape(12.dp),
+    modifier = modifier.rotate(rotation)
+  ) {
+    Text(
+      text = text,
+      color = color.copy(alpha = alpha),
+      fontWeight = FontWeight.ExtraBold,
+      fontSize = 20.sp,
+      modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+    )
+  }
+}
+
+/**
+ * Barra inferiore sotto la carta con i 4 pulsanti corrispondenti alle 4 direzioni di Swipe:
+ * 1. ✖️ Sinistra = Non farmelo più vedere
+ * 2. 🔄 Basso = Rimettilo nel pool
+ * 3. ✅ Alto = Già visto
+ * 4. ❤️ Destra = Metti in lista (Da Vedere)
+ */
+@Composable
 private fun ActionButtonsRow(
-  remainingCount: Int,
-  onSkip: () -> Unit,
+  onDislikeForever: () -> Unit,
+  onPutBackInPool: () -> Unit,
   onMarkWatched: () -> Unit,
-  onLike: () -> Unit,
+  onLikeToWatchlist: () -> Unit,
   modifier: Modifier = Modifier
 ) {
   Row(
@@ -1074,84 +1164,516 @@ private fun ActionButtonsRow(
     horizontalArrangement = Arrangement.SpaceEvenly,
     verticalAlignment = Alignment.CenterVertically
   ) {
-    // Bottone SALTA (Sinistra)
-    FilledIconButton(
-      onClick = onSkip,
-      modifier = Modifier.size(58.dp),
-      shape = CircleShape,
-      colors = IconButtonDefaults.filledIconButtonColors(
-        containerColor = CinemaCardSurface,
-        contentColor = SkipRed
-      )
-    ) {
-      Icon(
-        imageVector = Icons.Default.Close,
-        contentDescription = "Salta questo titolo",
-        modifier = Modifier.size(28.dp)
-      )
+    // 1. SINISTRA (✖️ Non farmelo più vedere)
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+      FilledIconButton(
+        onClick = onDislikeForever,
+        modifier = Modifier.size(52.dp),
+        shape = CircleShape,
+        colors = IconButtonDefaults.filledIconButtonColors(
+          containerColor = CinemaCardSurface,
+          contentColor = SkipRed
+        )
+      ) {
+        Icon(
+          imageVector = Icons.Default.Close,
+          contentDescription = "Non mostrare più",
+          modifier = Modifier.size(26.dp)
+        )
+      }
+      Text("Mai più", color = SkipRed, fontSize = 10.sp, fontWeight = FontWeight.Bold)
     }
 
-    // Bottone centrale rapido "Già Visto ✅" + contatore mazzo
+    // 2. BASSO (🔄 Rimettilo nel pool)
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-      OutlinedButton(
+      FilledIconButton(
+        onClick = onPutBackInPool,
+        modifier = Modifier.size(46.dp),
+        shape = CircleShape,
+        colors = IconButtonDefaults.filledIconButtonColors(
+          containerColor = CinemaCardSurface,
+          contentColor = MalBlueLight
+        )
+      ) {
+        Icon(
+          imageVector = Icons.Default.Replay,
+          contentDescription = "Rimetti nel pool",
+          modifier = Modifier.size(22.dp)
+        )
+      }
+      Text("Nel pool", color = MalBlueLight, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+    }
+
+    // 3. ALTO (✅ Già visto)
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+      FilledIconButton(
         onClick = onMarkWatched,
-        border = BorderStroke(1.dp, ImdbGold.copy(alpha = 0.6f)),
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-        shape = RoundedCornerShape(50)
+        modifier = Modifier.size(46.dp),
+        shape = CircleShape,
+        colors = IconButtonDefaults.filledIconButtonColors(
+          containerColor = CinemaCardSurface,
+          contentColor = ImdbGold
+        )
       ) {
         Icon(
           imageVector = Icons.Default.Check,
-          contentDescription = null,
-          tint = ImdbGold,
-          modifier = Modifier.size(16.dp)
+          contentDescription = "Già visto",
+          modifier = Modifier.size(22.dp)
         )
-        Spacer(modifier = Modifier.width(4.dp))
-        Text("Già visto", color = ImdbGold, fontSize = 12.sp, fontWeight = FontWeight.Bold)
       }
-      Text(
-        text = "$remainingCount nel mazzo",
-        color = TextSecondary,
-        fontSize = 11.sp
-      )
+      Text("Già visto", color = ImdbGold, fontSize = 10.sp, fontWeight = FontWeight.Bold)
     }
 
-    // Bottone DA VEDERE / MI ISPIRA (Destra)
-    FilledIconButton(
-      onClick = onLike,
-      modifier = Modifier.size(58.dp),
-      shape = CircleShape,
-      colors = IconButtonDefaults.filledIconButtonColors(
-        containerColor = LikeGreen,
-        contentColor = Color.Black
-      )
-    ) {
-      Icon(
-        imageVector = Icons.Default.Favorite,
-        contentDescription = "Aggiungi a Da Vedere!",
-        modifier = Modifier.size(26.dp)
-      )
+    // 4. DESTRA (❤️ Mettiamolo in lista)
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+      FilledIconButton(
+        onClick = onLikeToWatchlist,
+        modifier = Modifier.size(52.dp),
+        shape = CircleShape,
+        colors = IconButtonDefaults.filledIconButtonColors(
+          containerColor = LikeGreen,
+          contentColor = Color.Black
+        )
+      ) {
+        Icon(
+          imageVector = Icons.Default.Favorite,
+          contentDescription = "Metti in lista",
+          modifier = Modifier.size(25.dp)
+        )
+      }
+      Text("In lista", color = LikeGreen, fontSize = 10.sp, fontWeight = FontWeight.Bold)
     }
   }
 }
 
 /**
- * Sezione 2: DA VEDERE (Watchlist).
- * Mostra tutti i Film, Serie TV e Anime che l'utente vuole guardare, con filtri per categoria,
- * accesso ai Ratings degli Episodi e pulsante per segnarli come "Già Visti".
+ * SCHEDA DETTAGLIO PROGRAMMA COMPLETA (`ProgramDetailSheet`):
+ * Mostra Trama integrale, Attori/Cast, Dove guardarlo con Link Redirect diretti,
+ * Lingue disponibili (Audio e Sottotitoli) e Programmi Simili cliccabili!
+ */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+private fun ProgramDetailSheet(
+  media: Movie,
+  isInWatchlist: Boolean,
+  isWatched: Boolean,
+  onDismiss: () -> Unit,
+  onAddToWatchlist: () -> Unit,
+  onMarkWatched: () -> Unit,
+  onOpenEpisodes: () -> Unit,
+  onSelectSimilar: (Movie) -> Unit
+) {
+  val context = LocalContext.current
+  val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+  val isMal = media.source == MediaSource.MYANIMELIST
+  val similarPrograms = remember(media.id) { CuratedImdbCatalog.findSimilarPrograms(media) }
+
+  ModalBottomSheet(
+    onDismissRequest = onDismiss,
+    sheetState = sheetState,
+    containerColor = CinemaSurface,
+    contentColor = TextPrimary
+  ) {
+    Column(
+      modifier = Modifier
+        .fillMaxWidth()
+        .verticalScroll(rememberScrollState())
+        .padding(horizontal = 20.dp, vertical = 8.dp)
+    ) {
+      // 1. Header con Locandina, Titolo, Voto e Azioni Rapide
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top
+      ) {
+        AsyncImage(
+          model = media.posterUrl,
+          contentDescription = media.title,
+          contentScale = ContentScale.Crop,
+          modifier = Modifier
+            .size(width = 110.dp, height = 160.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(CinemaCardSurface)
+        )
+
+        Spacer(modifier = Modifier.width(14.dp))
+
+        Column(modifier = Modifier.weight(1f)) {
+          Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            Surface(
+              color = if (isMal) MalBlue else ImdbGold,
+              shape = RoundedCornerShape(6.dp)
+            ) {
+              Text(
+                text = "${media.mediaType.badgeLabel} • ${media.source.badgeText}",
+                color = if (isMal) Color.White else Color.Black,
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = 10.sp,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+              )
+            }
+            Text(
+              text = "⭐ ${media.imdbRating}/10",
+              color = ImdbGold,
+              fontWeight = FontWeight.ExtraBold,
+              fontSize = 14.sp
+            )
+          }
+
+          Spacer(modifier = Modifier.height(6.dp))
+
+          Text(
+            text = media.title,
+            fontWeight = FontWeight.ExtraBold,
+            fontSize = 20.sp,
+            color = TextPrimary
+          )
+
+          Spacer(modifier = Modifier.height(4.dp))
+
+          Text(
+            text = "${media.year} • ${media.formattedRuntime}",
+            color = TextSecondary,
+            fontSize = 13.sp
+          )
+
+          Text(
+            text = "Regia / Studio: ${media.resolvedDirectorOrStudio}",
+            color = if (isMal) MalBlueLight else ImdbGold,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold
+          )
+
+          Spacer(modifier = Modifier.height(8.dp))
+
+          FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+          ) {
+            media.genres.forEach { g ->
+              Surface(
+                color = CinemaCardSurface,
+                shape = RoundedCornerShape(6.dp)
+              ) {
+                Text(
+                  text = g,
+                  color = TextPrimary,
+                  fontSize = 11.sp,
+                  modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                )
+              }
+            }
+          }
+        }
+      }
+
+      Spacer(modifier = Modifier.height(14.dp))
+
+      // Pulsanti azione ("In Lista ❤️", "Già Visto ✅", "Episodi 📊")
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+      ) {
+        Button(
+          onClick = onAddToWatchlist,
+          colors = ButtonDefaults.buttonColors(
+            containerColor = if (isInWatchlist) CinemaCardSurface else LikeGreen,
+            contentColor = if (isInWatchlist) LikeGreen else Color.Black
+          ),
+          modifier = Modifier.weight(1f)
+        ) {
+          Icon(Icons.Default.Favorite, contentDescription = null, modifier = Modifier.size(16.dp))
+          Spacer(modifier = Modifier.width(6.dp))
+          Text(
+            text = if (isInWatchlist) "Già in Lista" else "Metti in Lista",
+            fontWeight = FontWeight.Bold,
+            fontSize = 12.sp
+          )
+        }
+
+        Button(
+          onClick = onMarkWatched,
+          colors = ButtonDefaults.buttonColors(
+            containerColor = if (isWatched) CinemaCardSurface else ImdbGold,
+            contentColor = if (isWatched) ImdbGold else Color.Black
+          ),
+          modifier = Modifier.weight(1f)
+        ) {
+          Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+          Spacer(modifier = Modifier.width(6.dp))
+          Text(
+            text = if (isWatched) "Già Visto ✓" else "Segna Visto",
+            fontWeight = FontWeight.Bold,
+            fontSize = 12.sp
+          )
+        }
+      }
+
+      if (media.isEpisodic) {
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedButton(
+          onClick = onOpenEpisodes,
+          border = BorderStroke(1.dp, ImdbGold),
+          modifier = Modifier.fillMaxWidth()
+        ) {
+          Icon(Icons.AutoMirrored.Filled.FormatListBulleted, contentDescription = null, tint = ImdbGold)
+          Spacer(modifier = Modifier.width(8.dp))
+          Text(
+            text = "Apri tutti i ${maxOf(media.episodes.size, media.totalEpisodes)} Episodi & Ratings ⭐",
+            color = ImdbGold,
+            fontWeight = FontWeight.ExtraBold
+          )
+        }
+      }
+
+      Spacer(modifier = Modifier.height(16.dp))
+
+      // 2. TRAMA COMPLETA
+      Text(
+        text = "📖 Trama",
+        color = ImdbGold,
+        fontWeight = FontWeight.ExtraBold,
+        fontSize = 15.sp
+      )
+      Spacer(modifier = Modifier.height(6.dp))
+      Surface(
+        color = CinemaCardSurface,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth()
+      ) {
+        Text(
+          text = media.plot,
+          color = TextPrimary,
+          fontSize = 14.sp,
+          lineHeight = 20.sp,
+          modifier = Modifier.padding(14.dp)
+        )
+      }
+
+      Spacer(modifier = Modifier.height(16.dp))
+
+      // 3. DOVE GUARDARLO (CON LINK REDIRECT DIRETTI!)
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Default.PlayArrow, contentDescription = null, tint = LikeGreen, modifier = Modifier.size(20.dp))
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+          text = "Dove guardarlo (Tocca per aprire)",
+          color = LikeGreen,
+          fontWeight = FontWeight.ExtraBold,
+          fontSize = 15.sp
+        )
+      }
+      Spacer(modifier = Modifier.height(8.dp))
+      FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+      ) {
+        media.watchLinks.forEach { provider ->
+          Surface(
+            color = Color(provider.badgeColorHex),
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier.clickable {
+              val intent = Intent(Intent.ACTION_VIEW, Uri.parse(provider.url))
+              context.startActivity(intent)
+            }
+          ) {
+            Row(
+              verticalAlignment = Alignment.CenterVertically,
+              modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+            ) {
+              Text(
+                text = provider.name,
+                color = Color.White,
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = 12.sp
+              )
+              Spacer(modifier = Modifier.width(6.dp))
+              Icon(
+                imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(14.dp)
+              )
+            }
+          }
+        }
+
+        // Link diretto anche alla scheda ufficiale IMDb / MyAnimeList
+        Surface(
+          color = if (isMal) MalBlue else ImdbGold,
+          shape = RoundedCornerShape(10.dp),
+          modifier = Modifier.clickable {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(media.externalPageUrl))
+            context.startActivity(intent)
+          }
+        ) {
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+          ) {
+            Text(
+              text = "Scheda ${media.source.badgeText}",
+              color = if (isMal) Color.White else Color.Black,
+              fontWeight = FontWeight.ExtraBold,
+              fontSize = 12.sp
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Icon(
+              imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+              contentDescription = null,
+              tint = if (isMal) Color.White else Color.Black,
+              modifier = Modifier.size(14.dp)
+            )
+          }
+        }
+      }
+
+      Spacer(modifier = Modifier.height(16.dp))
+
+      // 4. ATTORI / CAST PRINCIPALE
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Default.Person, contentDescription = null, tint = ImdbGold, modifier = Modifier.size(18.dp))
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+          text = "Cast, Attori & Produzione",
+          color = ImdbGold,
+          fontWeight = FontWeight.ExtraBold,
+          fontSize = 15.sp
+        )
+      }
+      Spacer(modifier = Modifier.height(8.dp))
+      FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+      ) {
+        media.resolvedCast.forEach { person ->
+          Surface(
+            color = CinemaCardSurface,
+            shape = RoundedCornerShape(10.dp),
+            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
+          ) {
+            Text(
+              text = "🎭 $person",
+              color = TextPrimary,
+              fontSize = 12.sp,
+              fontWeight = FontWeight.Medium,
+              modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+            )
+          }
+        }
+      }
+
+      Spacer(modifier = Modifier.height(16.dp))
+
+      // 5. LINGUE DISPONIBILI (AUDIO & SOTTOTITOLI)
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Default.Language, contentDescription = null, tint = MalBlueLight, modifier = Modifier.size(18.dp))
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+          text = "Lingue e Sottotitoli disponibili",
+          color = MalBlueLight,
+          fontWeight = FontWeight.ExtraBold,
+          fontSize = 15.sp
+        )
+      }
+      Spacer(modifier = Modifier.height(6.dp))
+      Surface(
+        color = CinemaCardSurface,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth()
+      ) {
+        Text(
+          text = media.resolvedLanguages,
+          color = TextPrimary,
+          fontSize = 13.sp,
+          modifier = Modifier.padding(12.dp)
+        )
+      }
+
+      // 6. PROGRAMMI SIMILI CONSIGLIATI
+      if (similarPrograms.isNotEmpty()) {
+        Spacer(modifier = Modifier.height(18.dp))
+        Text(
+          text = "✨ Programmi simili consigliati",
+          color = ImdbGold,
+          fontWeight = FontWeight.ExtraBold,
+          fontSize = 15.sp
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        LazyRow(
+          horizontalArrangement = Arrangement.spacedBy(12.dp),
+          contentPadding = PaddingValues(bottom = 28.dp)
+        ) {
+          items(similarPrograms, key = { it.id }) { sim ->
+            Surface(
+              color = CinemaCardSurface,
+              shape = RoundedCornerShape(12.dp),
+              border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+              modifier = Modifier
+                .width(126.dp)
+                .clickable { onSelectSimilar(sim) }
+            ) {
+              Column(modifier = Modifier.padding(8.dp)) {
+                AsyncImage(
+                  model = sim.posterUrl,
+                  contentDescription = sim.title,
+                  contentScale = ContentScale.Crop,
+                  modifier = Modifier
+                    .height(150.dp)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(CinemaSurface)
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                  text = sim.title,
+                  color = TextPrimary,
+                  fontWeight = FontWeight.Bold,
+                  fontSize = 12.sp,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                  text = "⭐ ${sim.imdbRating} • ${sim.year}",
+                  color = ImdbGold,
+                  fontSize = 11.sp
+                )
+              }
+            }
+          }
+        }
+      } else {
+        Spacer(modifier = Modifier.height(28.dp))
+      }
+    }
+  }
+}
+
+/**
+ * Sezione 2: DA VEDERE (Lista Generale Illimitata di Film, Serie TV e Anime che vuoi guardare).
  */
 @Composable
 private fun WatchlistSection(
   watchlist: List<Movie>,
   userProgress: Map<String, UserMediaProgress>,
-  onChooseForTonight: (Movie) -> Unit,
+  onOpenDetails: (Movie) -> Unit,
+  onPickRandom: () -> Unit,
   onMarkWatched: (Movie) -> Unit,
   onOpenEpisodes: (Movie) -> Unit,
   onRemoveFromWatchlist: (Movie) -> Unit,
   onGoToDiscover: () -> Unit
 ) {
   var filterType by remember { mutableStateOf<MediaType?>(null) }
-  val filteredList = remember(watchlist, filterType) {
-    if (filterType == null) watchlist else watchlist.filter { it.mediaType == filterType }
+  var filterQuery by remember { mutableStateOf("") }
+
+  val filteredList = remember(watchlist, filterType, filterQuery) {
+    watchlist.filter { item ->
+      val matchType = filterType == null || item.mediaType == filterType
+      val matchQuery = filterQuery.isBlank() || item.title.contains(filterQuery, ignoreCase = true)
+      matchType && matchQuery
+    }
   }
 
   Column(
@@ -1162,7 +1684,7 @@ private fun WatchlistSection(
     // Filtri rapidi per categoria (Tutti / Film / Serie TV / Anime)
     LazyRow(
       horizontalArrangement = Arrangement.spacedBy(8.dp),
-      contentPadding = PaddingValues(vertical = 8.dp)
+      contentPadding = PaddingValues(vertical = 6.dp)
     ) {
       item {
         FilterChip(
@@ -1193,6 +1715,33 @@ private fun WatchlistSection(
       }
     }
 
+    if (watchlist.size >= 2) {
+      OutlinedTextField(
+        value = filterQuery,
+        onValueChange = { filterQuery = it },
+        placeholder = { Text("Filtra nella tua lista Da Vedere...") },
+        singleLine = true,
+        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = ImdbGold) },
+        trailingIcon = {
+          if (filterQuery.isNotEmpty()) {
+            IconButton(onClick = { filterQuery = "" }) {
+              Icon(Icons.Default.Close, contentDescription = null)
+            }
+          }
+        },
+        colors = OutlinedTextFieldDefaults.colors(
+          focusedBorderColor = ImdbGold,
+          unfocusedBorderColor = CinemaCardSurface,
+          focusedContainerColor = CinemaSurface,
+          unfocusedContainerColor = CinemaSurface
+        ),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier
+          .fillMaxWidth()
+          .padding(bottom = 8.dp)
+      )
+    }
+
     if (filteredList.isEmpty()) {
       Box(
         modifier = Modifier
@@ -1212,7 +1761,7 @@ private fun WatchlistSection(
           )
           Spacer(modifier = Modifier.height(12.dp))
           Text(
-            text = "La tua lista 'Da Vedere' è vuota",
+            text = "Nessun programma in questa vista",
             fontWeight = FontWeight.Bold,
             fontSize = 19.sp,
             color = TextPrimary,
@@ -1220,7 +1769,7 @@ private fun WatchlistSection(
           )
           Spacer(modifier = Modifier.height(6.dp))
           Text(
-            text = "Scorri le schede a destra nella sezione Scopri o importa la tua lista da MyAnimeList!",
+            text = "Fai swipe a destra (❤️) nella sezione Scopri per costruire la tua lista personale senza alcun limite!",
             color = TextSecondary,
             fontSize = 14.sp,
             textAlign = TextAlign.Center
@@ -1240,7 +1789,7 @@ private fun WatchlistSection(
     } else {
       LazyColumn(
         verticalArrangement = Arrangement.spacedBy(12.dp),
-        contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp),
+        contentPadding = PaddingValues(top = 4.dp, bottom = 24.dp),
         modifier = Modifier.weight(1f)
       ) {
         items(filteredList, key = { it.id }) { movie ->
@@ -1253,13 +1802,12 @@ private fun WatchlistSection(
             border = BorderStroke(1.dp, Color.White.copy(alpha = 0.06f)),
             modifier = Modifier
               .fillMaxWidth()
-              .clickable { onChooseForTonight(movie) }
+              .clickable { onOpenDetails(movie) }
           ) {
             Row(
               modifier = Modifier.padding(12.dp),
               verticalAlignment = Alignment.CenterVertically
             ) {
-              // Mini-locandina
               AsyncImage(
                 model = movie.posterUrl,
                 contentDescription = movie.title,
@@ -1365,7 +1913,7 @@ private fun WatchlistSection(
 }
 
 /**
- * Sezione 3: GIÀ VISTI & EPISODI (Watched + Voti Personali + Tracker Episodi + Sync MyAnimeList).
+ * Sezione 3: GIÀ VISTI & EPISODI.
  */
 @Composable
 private fun WatchedSection(
@@ -1375,6 +1923,7 @@ private fun WatchedSection(
   malUsername: String,
   isSyncingMal: Boolean,
   malSyncMessage: String?,
+  onOpenDetails: (Movie) -> Unit,
   onRateMedia: (String, Int) -> Unit,
   onOpenEpisodes: (Movie) -> Unit,
   onMoveToWatchlist: (Movie) -> Unit,
@@ -1405,7 +1954,6 @@ private fun WatchedSection(
     verticalArrangement = Arrangement.spacedBy(12.dp),
     contentPadding = PaddingValues(top = 8.dp, bottom = 32.dp)
   ) {
-    // 1. Riepilogo Statistiche Utente + Pulsante MyAnimeList
     item {
       Surface(
         color = CinemaSurface,
@@ -1426,7 +1974,6 @@ private fun WatchedSection(
 
           Spacer(modifier = Modifier.height(12.dp))
 
-          // Bottone per aprire il collegamento a MyAnimeList (MAL)
           Surface(
             color = MalBlue.copy(alpha = 0.22f),
             shape = RoundedCornerShape(12.dp),
@@ -1545,7 +2092,6 @@ private fun WatchedSection(
       }
     }
 
-    // 2. Filtri per categoria (Tutti / Film / Serie TV / Anime)
     item {
       LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
@@ -1578,7 +2124,6 @@ private fun WatchedSection(
       }
     }
 
-    // 3. Lista dei titoli Già Visti (con Voto Personale ⭐ e progresso Episodi)
     if (filteredWatched.isEmpty()) {
       item {
         Column(
@@ -1602,7 +2147,7 @@ private fun WatchedSection(
           )
           Spacer(modifier = Modifier.height(6.dp))
           Text(
-            text = "Premi 'Già visto' sulle schede, spunta gli episodi di una Serie TV / Anime oppure importa il tuo profilo MyAnimeList!",
+            text = "Fai swipe verso l'alto (⬆️) sulle schede che hai già visto o spunta gli episodi di una Serie TV / Anime!",
             color = TextSecondary,
             fontSize = 13.sp,
             textAlign = TextAlign.Center
@@ -1622,9 +2167,9 @@ private fun WatchedSection(
         WatchedMediaCard(
           movie = movie,
           progress = prog,
+          onOpenDetails = { onOpenDetails(movie) },
           onRateMedia = { stars -> onRateMedia(movie.id, stars) },
           onOpenEpisodes = { onOpenEpisodes(movie) },
-          onMoveToWatchlist = { onMoveToWatchlist(movie) },
           onRemove = { onRemoveWatched(movie) }
         )
       }
@@ -1649,31 +2194,27 @@ private fun StatBadge(value: String, label: String) {
   }
 }
 
-/**
- * Scheda di un Film, Serie TV o Anime nella sezione "Già Visti":
- * permette di dare il proprio voto personale (1..10 ⭐), aprire il tracker degli episodi
- * o aprire direttamente la pagina su IMDb / MyAnimeList.
- */
 @Composable
 private fun WatchedMediaCard(
   movie: Movie,
   progress: UserMediaProgress,
+  onOpenDetails: () -> Unit,
   onRateMedia: (Int) -> Unit,
   onOpenEpisodes: () -> Unit,
-  onMoveToWatchlist: () -> Unit,
   onRemove: () -> Unit
 ) {
-  val context = LocalContext.current
   var showRatingPicker by remember { mutableStateOf(false) }
   val isMal = movie.source == MediaSource.MYANIMELIST
-  val totalEpCount = if (movie.episodes.isNotEmpty()) movie.episodes.size else movie.totalEpisodes
+  val totalEpCount = maxOf(movie.episodes.size, movie.totalEpisodes)
   val watchedEpCount = progress.watchedEpisodeIds.size
 
   Surface(
     color = CinemaCardSurface,
     shape = RoundedCornerShape(16.dp),
     border = BorderStroke(1.dp, Color.White.copy(alpha = 0.07f)),
-    modifier = Modifier.fillMaxWidth()
+    modifier = Modifier
+      .fillMaxWidth()
+      .clickable { onOpenDetails() }
   ) {
     Column(modifier = Modifier.padding(14.dp)) {
       Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1732,7 +2273,6 @@ private fun WatchedMediaCard(
 
           Spacer(modifier = Modifier.height(8.dp))
 
-          // Riga pulsanti: Voto personale ⭐ + Episodi & Ratings + Link esterno IMDb/MAL
           Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -1745,7 +2285,7 @@ private fun WatchedMediaCard(
             ) {
               Text(
                 text = if (progress.userRating != null) {
-                  "Il tuo voto: ⭐ ${progress.userRating}/10"
+                  "Tuo voto: ⭐ ${progress.userRating}/10"
                 } else {
                   "Dai un voto ⭐"
                 },
@@ -1776,16 +2316,11 @@ private fun WatchedMediaCard(
         }
 
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-          IconButton(
-            onClick = {
-              val intent = Intent(Intent.ACTION_VIEW, Uri.parse(movie.externalPageUrl))
-              context.startActivity(intent)
-            }
-          ) {
+          IconButton(onClick = onOpenDetails) {
             Icon(
-              imageVector = Icons.AutoMirrored.Filled.OpenInNew,
-              contentDescription = "Apri su ${movie.source.badgeText}",
-              tint = if (isMal) MalBlueLight else ImdbGold,
+              imageVector = Icons.Default.Info,
+              contentDescription = "Dettagli programma",
+              tint = ImdbGold,
               modifier = Modifier.size(20.dp)
             )
           }
@@ -1800,7 +2335,6 @@ private fun WatchedMediaCard(
         }
       }
 
-      // Barra di avanzamento episodi per Serie TV e Anime
       if (movie.isEpisodic && totalEpCount > 0) {
         Spacer(modifier = Modifier.height(10.dp))
         val ratio = (watchedEpCount.toFloat() / totalEpCount.toFloat()).coerceIn(0f, 1f)
@@ -1815,7 +2349,6 @@ private fun WatchedMediaCard(
         )
       }
 
-      // Selettore interattivo di voto personale (da 1 a 10 stelle ⭐)
       AnimatedVisibility(visible = showRatingPicker) {
         Column(modifier = Modifier.padding(top = 10.dp)) {
           Text(
@@ -1837,9 +2370,6 @@ private fun WatchedMediaCard(
   }
 }
 
-/**
- * Barra numerata interattiva da 1 a 10 per assegnare un voto con un semplice tocco.
- */
 @Composable
 private fun RatingBar1To10(
   currentRating: Int?,
@@ -1876,10 +2406,7 @@ private fun RatingBar1To10(
 }
 
 /**
- * Pannello Modale "Episodi & Ratings" per Serie TV e Anime:
- * - Mostra il voto medio ufficiale della community (IMDb / MyAnimeList) per ogni singolo episodio
- * - Permette di segnare ogni episodio come "Visto" (☑️)
- * - Permette di dare il proprio voto personale (1..10 ⭐) a ogni singolo episodio!
+ * Pannello Modale "Episodi & Ratings" per Serie TV e Anime (tutti gli episodi disponibili!).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1889,8 +2416,7 @@ private fun EpisodeTrackerSheet(
   progress: UserMediaProgress,
   onDismiss: () -> Unit,
   onToggleEpisodeWatched: (String) -> Unit,
-  onRateEpisode: (String, Int) -> Unit,
-  onRateWholeSeries: (Int) -> Unit
+  onRateEpisode: (String, Int) -> Unit
 ) {
   val context = LocalContext.current
   val isAnime = media.mediaType == MediaType.ANIME
@@ -1906,7 +2432,6 @@ private fun EpisodeTrackerSheet(
         .fillMaxWidth()
         .padding(horizontal = 20.dp, vertical = 8.dp)
     ) {
-      // Intestazione Serie TV / Anime
       Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1991,7 +2516,6 @@ private fun EpisodeTrackerSheet(
             val userEpRating = progress.episodeRatings[ep.id]
             val isRatingExpanded = expandedEpisodeForRating == ep.id
 
-            // Colore stile Heatmap per il voto ufficiale dell'episodio
             val badgeColor = when {
               ep.communityRating >= 9.6 -> ImdbGold
               ep.communityRating >= 9.0 -> LikeGreen
@@ -2013,7 +2537,6 @@ private fun EpisodeTrackerSheet(
                   verticalAlignment = Alignment.CenterVertically,
                   horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                  // Spunta "Visto" (☑️)
                   IconButton(
                     onClick = { onToggleEpisodeWatched(ep.id) },
                     modifier = Modifier.size(36.dp)
@@ -2028,7 +2551,6 @@ private fun EpisodeTrackerSheet(
 
                   Spacer(modifier = Modifier.width(8.dp))
 
-                  // Codice + Titolo episodio
                   Column(modifier = Modifier.weight(1f)) {
                     Row(
                       verticalAlignment = Alignment.CenterVertically,
@@ -2058,7 +2580,6 @@ private fun EpisodeTrackerSheet(
 
                   Spacer(modifier = Modifier.width(8.dp))
 
-                  // Voto Ufficiale Community + Pulsante Tuo Voto
                   Column(horizontalAlignment = Alignment.End) {
                     Surface(
                       color = badgeColor,
@@ -2094,7 +2615,6 @@ private fun EpisodeTrackerSheet(
                   }
                 }
 
-                // Selettore voto episodio (1..10) a comparsa
                 AnimatedVisibility(visible = isRatingExpanded) {
                   Column(modifier = Modifier.padding(top = 10.dp)) {
                     Text(
@@ -2139,7 +2659,7 @@ private fun EmptyDeckState(
     )
     Spacer(modifier = Modifier.height(16.dp))
     Text(
-      text = "Hai visto tutte le schede di questo mazzo!",
+      text = "Hai sfogliato tutte le schede di questa selezione!",
       fontWeight = FontWeight.Bold,
       fontSize = 20.sp,
       color = TextPrimary,
@@ -2148,9 +2668,9 @@ private fun EmptyDeckState(
     Spacer(modifier = Modifier.height(8.dp))
     Text(
       text = if (likedCount > 0) {
-        "Hai salvato $likedCount titoli in 'Da Vedere'. Lascia che il dado scelga il vincitore della serata!"
+        "Hai $likedCount programmi nella tua lista 'Da Vedere'. Puoi sorteggiarne uno o ricaricare il mazzo!"
       } else {
-        "Rimescola il mazzo o cambia categoria (Film / Serie TV / Anime) per scoprire nuovi titoli."
+        "Rimescola il mazzo o cambia genere/categoria per scoprire altri titoli."
       },
       color = TextSecondary,
       textAlign = TextAlign.Center
@@ -2183,17 +2703,16 @@ private fun EmptyDeckState(
 }
 
 /**
- * Dialog che annuncia il titolo estratto a sorte per la serata (Film, Serie TV o Anime).
+ * Dialog che annuncia il titolo estratto a sorte per la serata.
  */
 @Composable
 fun WinnerMovieDialog(
   movie: Movie,
   onDismiss: () -> Unit,
   onPickAnother: () -> Unit,
-  onMarkWatched: () -> Unit = {},
-  onOpenEpisodes: () -> Unit = {}
+  onOpenDetails: () -> Unit = {},
+  onMarkWatched: () -> Unit = {}
 ) {
-  val context = LocalContext.current
   val isMal = movie.source == MediaSource.MYANIMELIST
 
   Dialog(onDismissRequest = onDismiss) {
@@ -2228,6 +2747,7 @@ fun WinnerMovieDialog(
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .background(CinemaCardSurface)
+            .clickable { onOpenDetails() }
         ) {
           AsyncImage(
             model = movie.posterUrl,
@@ -2270,20 +2790,17 @@ fun WinnerMovieDialog(
         Spacer(modifier = Modifier.height(14.dp))
 
         Button(
-          onClick = {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(movie.externalPageUrl))
-            context.startActivity(intent)
-          },
+          onClick = onOpenDetails,
           colors = ButtonDefaults.buttonColors(
             containerColor = if (isMal) MalBlue else ImdbGold,
             contentColor = if (isMal) Color.White else Color.Black
           ),
           modifier = Modifier.fillMaxWidth()
         ) {
-          Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
+          Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(18.dp))
           Spacer(modifier = Modifier.width(8.dp))
           Text(
-            text = if (isMal) "Apri scheda su MyAnimeList" else "Apri scheda su IMDb",
+            text = "Apri Scheda & Dove Guardarlo 📺",
             fontWeight = FontWeight.Bold
           )
         }
@@ -2307,23 +2824,6 @@ fun WinnerMovieDialog(
             Text("Segna Visto", fontWeight = FontWeight.Bold, fontSize = 12.sp)
           }
 
-          if (movie.isEpisodic) {
-            OutlinedButton(
-              onClick = onOpenEpisodes,
-              modifier = Modifier.weight(1f),
-              border = BorderStroke(1.dp, ImdbGold)
-            ) {
-              Text("Episodi ⭐", color = ImdbGold, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-            }
-          }
-        }
-
-        Spacer(modifier = Modifier.height(6.dp))
-
-        Row(
-          modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
           OutlinedButton(
             onClick = onPickAnother,
             modifier = Modifier.weight(1f),
@@ -2331,119 +2831,7 @@ fun WinnerMovieDialog(
           ) {
             Icon(Icons.Default.Casino, contentDescription = null, modifier = Modifier.size(16.dp))
             Spacer(modifier = Modifier.width(6.dp))
-            Text("Pesca altro")
-          }
-          OutlinedButton(
-            onClick = onDismiss,
-            modifier = Modifier.weight(1f),
-            border = BorderStroke(1.dp, TextSecondary.copy(alpha = 0.4f))
-          ) {
-            Text("Chiudi")
-          }
-        }
-      }
-    }
-  }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ShortlistBottomSheet(
-  likedMovies: List<Movie>,
-  onDismiss: () -> Unit,
-  onRemoveMovie: (Movie) -> Unit,
-  onChooseMovie: (Movie) -> Unit,
-  onPickRandomFromLikes: () -> Unit
-) {
-  ModalBottomSheet(
-    onDismissRequest = onDismiss,
-    containerColor = CinemaSurface,
-    contentColor = TextPrimary
-  ) {
-    Column(
-      modifier = Modifier
-        .fillMaxWidth()
-        .padding(horizontal = 20.dp, vertical = 12.dp)
-    ) {
-      Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-      ) {
-        Column {
-          Text(
-            text = "I tuoi candidati Da Vedere ❤️",
-            fontWeight = FontWeight.ExtraBold,
-            fontSize = 19.sp
-          )
-          Text(
-            text = "${likedMovies.size} titoli selezionati",
-            color = TextSecondary,
-            fontSize = 13.sp
-          )
-        }
-        if (likedMovies.size >= 2) {
-          Button(
-            onClick = onPickRandomFromLikes,
-            colors = ButtonDefaults.buttonColors(
-              containerColor = ImdbGold,
-              contentColor = Color.Black
-            )
-          ) {
-            Icon(Icons.Default.Casino, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(modifier = Modifier.width(6.dp))
-            Text("Sorteggia!", fontWeight = FontWeight.Bold)
-          }
-        }
-      }
-
-      Spacer(modifier = Modifier.height(14.dp))
-
-      if (likedMovies.isEmpty()) {
-        Text(
-          text = "Non hai ancora salvato nessun titolo. Scorri le schede a destra o premi il cuore verde per aggiungerli qui!",
-          color = TextSecondary,
-          modifier = Modifier.padding(vertical = 24.dp)
-        )
-      } else {
-        LazyColumn(
-          verticalArrangement = Arrangement.spacedBy(10.dp),
-          contentPadding = PaddingValues(bottom = 32.dp)
-        ) {
-          items(likedMovies, key = { it.id }) { movie ->
-            Surface(
-              color = CinemaCardSurface,
-              shape = RoundedCornerShape(14.dp),
-              modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onChooseMovie(movie) }
-            ) {
-              Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(12.dp)
-              ) {
-                Column(modifier = Modifier.weight(1f)) {
-                  Text(
-                    text = movie.title,
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary,
-                    fontSize = 16.sp
-                  )
-                  Text(
-                    text = "${movie.year} • ${movie.formattedRuntime} • ⭐ ${movie.imdbRating} ${movie.source.badgeText}",
-                    color = ImdbGold,
-                    fontSize = 12.sp
-                  )
-                }
-                IconButton(onClick = { onRemoveMovie(movie) }) {
-                  Icon(
-                    imageVector = Icons.Default.Delete,
-                    contentDescription = "Rimuovi",
-                    tint = TextSecondary
-                  )
-                }
-              }
-            }
+            Text("Pesca altro", fontSize = 12.sp)
           }
         }
       }

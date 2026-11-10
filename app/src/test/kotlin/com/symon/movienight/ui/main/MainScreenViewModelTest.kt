@@ -111,16 +111,47 @@ class MainScreenViewModelTest {
   }
 
   @Test
-  fun `swipe a sinistra (skipCurrentMovie) scarta il film e avanza`() = runTest {
-    val viewModel = MovieNightViewModel(FakeMovieRepository(), InMemoryLibraryStorage())
+  fun `swipe a sinistra (skipCurrentMovie) blocca per sempre il programma in dislikedIds`() = runTest {
+    val storage = InMemoryLibraryStorage()
+    val viewModel = MovieNightViewModel(FakeMovieRepository(), storage)
     val firstMovie = viewModel.uiState.value.currentMovie!!
 
     viewModel.skipCurrentMovie()
 
     val state = viewModel.uiState.value
     assertTrue(state.likedMovies.isEmpty())
-    assertEquals(1, state.skippedMovies.size)
-    assertEquals(firstMovie.id, state.skippedMovies.first().id)
+    assertTrue("L'ID deve essere salvato nei programmi da non mostrare più", firstMovie.id in state.dislikedIds)
+    assertTrue(firstMovie.id in storage.load().dislikedIds)
+
+    // Se ricarichiamo il catalogo, il film scartato non deve più apparire!
+    viewModel.selectGenre(MovieGenreFilter.ALL)
+    assertFalse("Il film scartato a sinistra non deve più comparire nel mazzo", viewModel.uiState.value.deck.any { it.id == firstMovie.id })
+  }
+
+  @Test
+  fun `swipe verso l alto (markCurrentMovieWatched) segna subito come Gia Visto`() = runTest {
+    val viewModel = MovieNightViewModel(FakeMovieRepository(), InMemoryLibraryStorage())
+    val firstMovie = viewModel.uiState.value.currentMovie!!
+
+    viewModel.markCurrentMovieWatched()
+
+    val state = viewModel.uiState.value
+    assertEquals(1, state.watchedMovies.size)
+    assertEquals(firstMovie.id, state.watchedMovies.first().id)
+    assertEquals(1, state.currentIndex)
+  }
+
+  @Test
+  fun `swipe verso il basso (putBackInPool) rimette la scheda in fondo al mazzo`() = runTest {
+    val viewModel = MovieNightViewModel(FakeMovieRepository(), InMemoryLibraryStorage())
+    val initialSize = viewModel.uiState.value.deck.size
+    val firstMovie = viewModel.uiState.value.currentMovie!!
+
+    viewModel.putBackInPool()
+
+    val state = viewModel.uiState.value
+    assertEquals(initialSize + 1, state.deck.size)
+    assertEquals(firstMovie.id, state.deck.last().id)
     assertEquals(1, state.currentIndex)
   }
 
@@ -138,31 +169,34 @@ class MainScreenViewModelTest {
   }
 
   @Test
-  fun `filtro per genere mostra solo i film di quel genere`() = runTest {
+  fun `filtro per genere e rigoroso e Attack on Titan non compare mai in Commedia`() = runTest {
     val viewModel = MovieNightViewModel(FakeMovieRepository(), InMemoryLibraryStorage())
 
-    viewModel.selectGenre(MovieGenreFilter.HORROR)
+    viewModel.selectMediaType(MediaType.ANIME)
+    viewModel.selectGenre(MovieGenreFilter.COMEDY)
 
     val state = viewModel.uiState.value
-    assertEquals(MovieGenreFilter.HORROR, state.selectedGenre)
-    assertTrue(state.deck.isNotEmpty())
-    assertTrue(state.deck.all { "Horror" in it.genres })
+    assertEquals(MovieGenreFilter.COMEDY, state.selectedGenre)
+    assertTrue("Ci devono essere anime commedia reali (es. Spy x Family, One Punch Man)", state.deck.isNotEmpty())
+    assertTrue("Tutti gli anime filtrati devono avere il genere Comedy", state.deck.all { "Comedy" in it.genres })
+    assertFalse("Attack on Titan NON deve essere in Commedia!", state.deck.any { it.title.contains("Attack on Titan") })
   }
 
   @Test
-  fun `selezione categoria Serie TV e Anime carica i rispettivi cataloghi con fonte corretta`() = runTest {
+  fun `nessun limite di 6 sugli episodi delle serie e apertura scheda dettagli`() = runTest {
     val viewModel = MovieNightViewModel(FakeMovieRepository(), InMemoryLibraryStorage())
+    val breakingBad = CuratedImdbCatalog.tvSeries.first { it.id == "tt0903747" }
+    val attackOnTitan = CuratedImdbCatalog.anime.first { it.id == "mal_16498" }
 
-    viewModel.selectMediaType(MediaType.TV_SERIES)
-    assertEquals(MediaType.TV_SERIES, viewModel.uiState.value.selectedMediaType)
-    assertTrue(viewModel.uiState.value.deck.all { it.mediaType == MediaType.TV_SERIES })
-    assertTrue(viewModel.uiState.value.deck.first().episodes.isNotEmpty())
+    assertEquals("Breaking Bad deve avere tutti i 62 episodi", 62, breakingBad.episodes.size)
+    assertEquals("Attack on Titan deve avere tutti gli 89 episodi", 89, attackOnTitan.episodes.size)
 
-    viewModel.selectMediaType(MediaType.ANIME)
-    assertEquals(MediaType.ANIME, viewModel.uiState.value.selectedMediaType)
-    assertTrue(viewModel.uiState.value.deck.all { it.mediaType == MediaType.ANIME })
-    assertTrue(viewModel.uiState.value.deck.all { it.source == MediaSource.MYANIMELIST })
-    assertTrue(viewModel.uiState.value.deck.first().externalPageUrl.contains("myanimelist.net/anime/"))
+    viewModel.openProgramDetails(breakingBad)
+    val detailMedia = viewModel.uiState.value.selectedMediaForDetails
+    assertNotNull(detailMedia)
+    assertTrue(detailMedia!!.resolvedCast.isNotEmpty())
+    assertTrue(detailMedia.watchLinks.isNotEmpty())
+    assertTrue(detailMedia.resolvedLanguages.isNotBlank())
   }
 
   @Test
@@ -171,11 +205,9 @@ class MainScreenViewModelTest {
     val viewModel = MovieNightViewModel(FakeMovieRepository(), storage)
     val movie = viewModel.uiState.value.currentMovie!!
 
-    // 1. Aggiungiamo in "Da Vedere"
     viewModel.likeCurrentMovie()
     assertEquals(1, viewModel.uiState.value.likedMovies.size)
 
-    // 2. Segniamo come "Già Visto" con voto 9/10
     viewModel.markAsWatched(movie, userRating = 9)
 
     val state = viewModel.uiState.value
@@ -189,9 +221,8 @@ class MainScreenViewModelTest {
   fun `tracciamento e rating dei singoli episodi di una Serie TV o Anime`() = runTest {
     val viewModel = MovieNightViewModel(FakeMovieRepository(), InMemoryLibraryStorage())
     val breakingBad = CuratedImdbCatalog.tvSeries.first { it.id == "tt0903747" }
-    val ozymandiasEp = breakingBad.episodes.first { it.episodeNumber == 14 }
+    val ozymandiasEp = breakingBad.episodes.first { it.id == "tt0903747_e60" }
 
-    // Votiamo l'episodio Ozymandias con 10 stelle!
     viewModel.rateEpisode(breakingBad, ozymandiasEp.id, rating = 10)
 
     val state = viewModel.uiState.value
@@ -201,7 +232,6 @@ class MainScreenViewModelTest {
     assertEquals(10, prog.episodeRatings[ozymandiasEp.id])
     assertTrue("La serie deve comparire tra i Già Visti / In visione", state.watchedMovies.any { it.id == breakingBad.id })
 
-    // Togliamo la spunta di visto dall'episodio
     viewModel.toggleEpisodeWatched(breakingBad, ozymandiasEp.id)
     assertFalse(ozymandiasEp.id in viewModel.uiState.value.userProgress[breakingBad.id]!!.watchedEpisodeIds)
   }
@@ -214,8 +244,8 @@ class MainScreenViewModelTest {
 
     val state = viewModel.uiState.value
     assertEquals("Symon180", state.malUsername)
-    assertTrue(state.watchedMovies.any { it.malId == 5114 }) // Fullmetal Alchemist: Brotherhood
-    assertTrue(state.likedMovies.any { it.malId == 52991 })  // Frieren in Plan to Watch
+    assertTrue(state.watchedMovies.any { it.malId == 5114 })
+    assertTrue(state.likedMovies.any { it.malId == 52991 })
     assertEquals(10, state.userProgress["mal_5114"]?.userRating)
     assertEquals(3, state.userProgress["mal_5114"]?.watchedEpisodeIds?.size)
   }
