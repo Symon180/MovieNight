@@ -1,51 +1,63 @@
-# 🍿 MovieNight (PickAMovie)
+# 🍿 MovieNight v2.0 (Film, Serie TV & Anime MyAnimeList)
 
 ![Kotlin](https://img.shields.io/badge/Kotlin-2.3.20-7F52FF?logo=kotlin&logoColor=white)
 ![Jetpack Compose](https://img.shields.io/badge/Jetpack%20Compose-Material%203-4285F4?logo=jetpackcompose&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Android%20(minSdk%2024)-3DDC84?logo=android&logoColor=white)
 ![IMDb](https://img.shields.io/badge/Data-Free%20IMDb%20API-F5C518?logo=imdb&logoColor=black)
+![MyAnimeList](https://img.shields.io/badge/Anime-MyAnimeList%20(Jikan%20v4)-2E51A2)
 [![CI](https://github.com/Symon180/MovieNight/actions/workflows/ci.yml/badge.svg)](https://github.com/Symon180/MovieNight/actions/workflows/ci.yml)
 
-**MovieNight** è un'applicazione Android nativa sviluppata in **Kotlin** e **Jetpack Compose** pensata per risolvere il classico dilemma serale: *"Cosa guardiamo stasera?"*.
-
-Attraverso un'interfaccia a schede scorrevoli (in stile *Tinder*) e un sorteggiatore intelligente, permette di esplorare i film del catalogo **IMDb**, filtrare per genere, salvare i titoli che ispirano di più ed estrarre a sorte il vincitore della serata.
+**MovieNight** è un'applicazione Android nativa sviluppata in **Kotlin** e **Jetpack Compose** per scegliere in pochi secondi cosa guardare la sera (**Film 🎬, Serie TV 📺 e Anime ⛩️**), organizzare la propria lista **Da Vedere**, tenere il diario dei titoli **Già Visti** e consultare/votare i **singoli episodi** con collegamento diretto a **IMDb** e **MyAnimeList (MAL)**.
 
 ---
 
-## ✨ Caratteristiche Principali
+## ✨ Caratteristiche Principali (v2.0)
 
-- **🎴 Mazzo di Schede con Gesto Swipe:**
-  - Trascina la scheda a **destra** (o premi ❤️) per aggiungere il film alla lista *"Mi ispira"* della serata.
-  - Trascina la scheda a **sinistra** (o premi ✖️) per scartarlo e passare al successivo.
-- **🎲 Pulsante "Scegli per me a caso!":**
-  - Se hai salvato dei film nei preferiti della serata, estrae a sorte il vincitore tra i tuoi candidati; altrimenti pesca direttamente dal mazzo attivo filtrato per genere.
-- **🎭 Filtri Rapidi per Genere & Ricerca Live IMDb:**
-  - Filtra con un tocco tra *Tutti, Sci-Fi, Azione, Thriller, Commedia, Dramma, Animazione, Horror* oppure cerca in tempo reale qualsiasi film o attore su IMDb.
-- **🌐 Architettura Ibrida (Free IMDb API + Catalogo Offline):**
-  - Interroga le API pubbliche gratuite di IMDb (`api.imdbapi.dev` e `v3.sg.media-imdb.com/suggestion`) senza bisogno di registrazione o chiavi API, ed è affiancata da un catalogo curato Top IMDb integrato per funzionare istantaneamente anche offline.
+- **🎴 Sezione Scopri (Swipe stile Tinder per Film, Serie TV & Anime):**
+  - Selettore rapido in alto tra **Film 🎬**, **Serie TV 📺** e **Anime ⛩️**.
+  - Trascina la scheda a **destra** (o premi ❤️) per salvare il titolo nella sezione **Da Vedere**.
+  - Trascina la scheda a **sinistra** (o premi ✖️) per scartarlo, oppure premi **Già visto ✅** per aggiungerlo direttamente al tuo diario.
+- **📌 Sezione "Da Vedere" (Watchlist Persistente):**
+  - Raccoglie tutti i Film, Serie TV e Anime che ti ispirano, filtrabili per categoria.
+  - Pulsante **🎲 "Sorteggia tra i Da Vedere!"** per estrarre a sorte cosa guardare stasera.
+- **✅ Sezione "Già Visti & Episodi" (Diario Personale):**
+  - Statistiche aggiornate su **Titoli Visti**, **Episodi Visti** e **Tuo Voto Medio ⭐**.
+  - Assegna il tuo **voto personale da 1 a 10 stelle** a qualsiasi Film, Serie TV o Anime.
+- **📊 Ratings degli Episodi & Tracker Avanzamento:**
+  - Per ogni **Serie TV** e **Anime**, apri il pannello **Episodi & Ratings** per vedere:
+    - Il **voto medio ufficiale della community** (IMDb / MyAnimeList) per ogni singolo episodio con badge colorato stile heatmap.
+    - La spunta **Visto ☑️** per tenere traccia dell'episodio a cui sei arrivato (con barra di progresso).
+    - Il **tuo voto personale (1-10 ⭐)** per ogni singolo episodio!
+- **⛩️ Integrazione MyAnimeList (MAL):**
+  - Catalogo Top Anime, ricerca live ed episodi alimentati dalla **Jikan REST API v4** (`api.jikan.moe/v4`, gratuita e senza registrazione), con badge ufficiale **MAL** e apertura diretta della scheda su `myanimelist.net`.
+  - **Import Profilo MyAnimeList:** inserisci il tuo username MAL per sincronizzare automaticamente i tuoi anime (*Plan to Watch* ➡️ *Da Vedere*, *Completed/Watching* ➡️ *Già Visti* con voti ed episodi).
+- **💾 Salvataggio Persistente Locale:**
+  - Tutte le tue liste, i voti personali e i progressi degli episodi vengono salvati automaticamente nella memoria del telefono (`SharedPreferencesLibraryStorage`).
 
 ---
 
 ## 🛠️ Stack Tecnologico e Architettura
 
 - **Linguaggio:** Kotlin 2.3 (JVM Toolchain 17)
-- **Interfaccia Utente:** Jetpack Compose + Material Design 3 (tema scuro *Cinema & IMDb Gold*)
-- **Architettura:** MVVM (`Model - View - ViewModel`) con `StateFlow` reattivo
+- **Interfaccia Utente:** Jetpack Compose + Material Design 3 (tema scuro *Cinema, IMDb Gold & MyAnimeList Blue*)
+- **Architettura:** MVVM (`Model - View - ViewModel`) con `StateFlow` reattivo e persistenza JSON locale
+- **Fonti Dati:** Free IMDb API (`api.imdbapi.dev`, `v3.sg.media-imdb.com`) + MyAnimeList Jikan API v4 (`api.jikan.moe/v4`) + Catalogo curato offline
 - **Caricamento Immagini:** Coil (`io.coil-kt:coil-compose`)
-- **Test:** JUnit 4 + `kotlinx-coroutines-test`
+- **Test:** JUnit 4 + `kotlinx-coroutines-test` (9 test unitari)
 
 ```text
 app/src/main/kotlin/com/symon/movienight/
 ├── MainActivity.kt                  # Entry point dell'applicazione Android
 ├── model/
-│   └── Movie.kt                     # Data class Movie e filtri per genere
+│   └── Movie.kt                     # Modelli Movie, MediaType, Episode, UserMediaProgress
 ├── data/
-│   └── MovieRepository.kt           # Client Free IMDb API + Catalogo curato integrato
+│   ├── MovieRepository.kt           # Client IMDb + MyAnimeList (Jikan v4) + Catalogo curato
+│   └── UserLibraryStorage.kt        # Persistenza JSON su SharedPreferences
 ├── viewmodel/
-│   └── MovieNightViewModel.kt       # Logica di stato (mazzo, swipe, filtri, sorteggio)
+│   └── MovieNightViewModel.kt       # Logica MVVM (Swipe, Watchlist, Già Visti, Episodi, Sync MAL)
 └── ui/
-    ├── MovieNightScreen.kt          # Componenti Compose (SwipeableMovieCard, WinnerDialog)
-    └── theme/                       # Tema scuro Cinema e palette colori IMDb
+    ├── MovieNightScreen.kt          # Navigazione a 3 tab, Swipe, Watchlist, Watched, EpisodeTrackerSheet
+    └── theme/                       # Tema scuro Cinema con accenti IMDb Gold e MAL Blue
 ```
 
 ---
@@ -53,7 +65,7 @@ app/src/main/kotlin/com/symon/movienight/
 ## 🚀 Come Compilare ed Eseguire
 
 ```bash
-# Eseguire la suite di test unitari
+# Eseguire la suite di test unitari (9 test)
 ./gradlew testDebugUnitTest
 
 # Compilare il pacchetto installabile APK (in app/build/outputs/apk/debug/app-debug.apk)
@@ -66,4 +78,3 @@ app/src/main/kotlin/com/symon/movienight/
 
 * **Autore:** [Simone Mariotti](https://github.com/Symon180)
 * **Licenza:** Rilasciato sotto licenza [MIT](LICENSE).
-

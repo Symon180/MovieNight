@@ -5,9 +5,11 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-// Palette colori "Cinema & IMDb Gold"
+// Palette colori "Cinema, IMDb Gold & MyAnimeList Blue"
 val ImdbGold = Color(0xFFF5C518)
 val ImdbGoldDark = Color(0xFFD4A500)
+val MalBlue = Color(0xFF2E51A2)
+val MalBlueLight = Color(0xFF4A73D1)
 val CinemaBackground = Color(0xFF0D0F14)
 val CinemaSurface = Color(0xFF181B24)
 val CinemaCardSurface = Color(0xFF212634)
