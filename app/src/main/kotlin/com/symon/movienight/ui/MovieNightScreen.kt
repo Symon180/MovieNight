@@ -84,6 +84,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -146,7 +147,10 @@ import kotlin.math.roundToInt
  * Schermata principale collegata al ViewModel e alla memoria persistente del telefono.
  */
 @Composable
-fun MovieNightRoute() {
+fun MovieNightRoute(
+  incomingOAuthUri: String? = null,
+  onConsumeOAuthUri: () -> Unit = {}
+) {
   val context = LocalContext.current
   val viewModel: MovieNightViewModel = viewModel(
     factory = remember(context) {
@@ -162,6 +166,13 @@ fun MovieNightRoute() {
     }
   )
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+
+  LaunchedEffect(incomingOAuthUri) {
+    if (!incomingOAuthUri.isNullOrBlank()) {
+      viewModel.completeMalOAuthWithCode(incomingOAuthUri)
+      onConsumeOAuthUri()
+    }
+  }
 
   MovieNightScreen(
     uiState = uiState,
@@ -187,7 +198,16 @@ fun MovieNightRoute() {
     onCloseEpisodes = viewModel::closeEpisodeTracker,
     onToggleEpisodeWatched = viewModel::toggleEpisodeWatched,
     onRateEpisode = viewModel::rateEpisode,
-    onImportMal = viewModel::importFromMyAnimeList,
+    onImportMal = { user -> viewModel.importFromMyAnimeList(user) },
+    onConnectMalTwoWay = viewModel::connectMalWithAccessToken,
+    onStartMalOAuth = { clientId ->
+      val authUrl = viewModel.prepareMalOAuthLoginUrl(clientId)
+      runCatching {
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)))
+      }
+    },
+    onCompleteMalOAuthCode = viewModel::completeMalOAuthWithCode,
+    onDisconnectMal = viewModel::disconnectMalAccount,
     onDismissMalMessage = viewModel::dismissMalSyncMessage,
     onPickRandom = viewModel::pickRandomForTonight,
     onReshuffle = viewModel::reshuffleDeck,
@@ -232,6 +252,10 @@ fun MovieNightScreen(
   onToggleEpisodeWatched: (Movie, String) -> Unit = { _, _ -> },
   onRateEpisode: (Movie, String, Int) -> Unit = { _, _, _ -> },
   onImportMal: (String) -> Unit = {},
+  onConnectMalTwoWay: (String, String) -> Unit = { _, _ -> },
+  onStartMalOAuth: (String) -> Unit = {},
+  onCompleteMalOAuthCode: (String) -> Unit = {},
+  onDisconnectMal: () -> Unit = {},
   onDismissMalMessage: () -> Unit = {}
 ) {
   var showSearchBar by remember { mutableStateOf(false) }
@@ -375,6 +399,9 @@ fun MovieNightScreen(
             userProgress = uiState.userProgress,
             totalEpisodesWatched = uiState.totalEpisodesWatched,
             malUsername = uiState.malUsername,
+            malAccessToken = uiState.malAccessToken,
+            malClientId = uiState.malClientId,
+            isTwoWayMalActive = uiState.isTwoWayMalActive,
             isSyncingMal = uiState.isSyncingMal,
             malSyncMessage = uiState.malSyncMessage,
             onOpenDetails = onOpenDetails,
@@ -383,6 +410,10 @@ fun MovieNightScreen(
             onMoveToWatchlist = onMoveToWatchlist,
             onRemoveWatched = onRemoveWatched,
             onImportMal = onImportMal,
+            onConnectMalTwoWay = onConnectMalTwoWay,
+            onStartMalOAuth = onStartMalOAuth,
+            onCompleteMalOAuthCode = onCompleteMalOAuthCode,
+            onDisconnectMal = onDisconnectMal,
             onDismissMalMessage = onDismissMalMessage,
             onGoToDiscover = { onSelectTab(AppTab.DISCOVER) }
           )
@@ -2094,6 +2125,9 @@ private fun WatchedSection(
   userProgress: Map<String, UserMediaProgress>,
   totalEpisodesWatched: Int,
   malUsername: String,
+  malAccessToken: String = "",
+  malClientId: String = "",
+  isTwoWayMalActive: Boolean = false,
   isSyncingMal: Boolean,
   malSyncMessage: String?,
   onOpenDetails: (Movie) -> Unit,
@@ -2102,11 +2136,19 @@ private fun WatchedSection(
   onMoveToWatchlist: (Movie) -> Unit,
   onRemoveWatched: (Movie) -> Unit,
   onImportMal: (String) -> Unit,
+  onConnectMalTwoWay: (String, String) -> Unit = { _, _ -> },
+  onStartMalOAuth: (String) -> Unit = {},
+  onCompleteMalOAuthCode: (String) -> Unit = {},
+  onDisconnectMal: () -> Unit = {},
   onDismissMalMessage: () -> Unit,
   onGoToDiscover: () -> Unit
 ) {
+  val context = LocalContext.current
   var malInput by remember(malUsername) { mutableStateOf(malUsername) }
+  var tokenInput by remember(malAccessToken) { mutableStateOf(malAccessToken) }
+  var clientIdInput by remember(malClientId) { mutableStateOf(malClientId) }
   var showMalCard by remember { mutableStateOf(false) }
+  var showTwoWaySetup by remember { mutableStateOf(false) }
   var filterType by remember { mutableStateOf<MediaType?>(null) }
 
   val filteredWatched = remember(watchedMovies, filterType) {
@@ -2150,7 +2192,7 @@ private fun WatchedSection(
           Surface(
             color = MalBlue.copy(alpha = 0.22f),
             shape = RoundedCornerShape(12.dp),
-            border = BorderStroke(1.dp, MalBlueLight),
+            border = BorderStroke(1.dp, if (isTwoWayMalActive) LikeGreen else MalBlueLight),
             modifier = Modifier
               .fillMaxWidth()
               .clickable { showMalCard = !showMalCard }
@@ -2160,14 +2202,17 @@ private fun WatchedSection(
               verticalAlignment = Alignment.CenterVertically,
               horizontalArrangement = Arrangement.SpaceBetween
             ) {
-              Row(verticalAlignment = Alignment.CenterVertically) {
+              Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+              ) {
                 Surface(
-                  color = MalBlue,
+                  color = if (isTwoWayMalActive) LikeGreen else MalBlue,
                   shape = RoundedCornerShape(6.dp)
                 ) {
                   Text(
-                    text = "MAL",
-                    color = Color.White,
+                    text = if (isTwoWayMalActive) "MAL ↔" else "MAL",
+                    color = if (isTwoWayMalActive) Color.Black else Color.White,
                     fontWeight = FontWeight.ExtraBold,
                     fontSize = 11.sp,
                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
@@ -2176,18 +2221,25 @@ private fun WatchedSection(
                 Spacer(modifier = Modifier.width(10.dp))
                 Column {
                   Text(
-                    text = if (malUsername.isNotBlank()) {
-                      "Profilo MyAnimeList: @$malUsername"
-                    } else {
-                      "Collega il tuo profilo MyAnimeList ⛩️"
+                    text = when {
+                      isTwoWayMalActive && malUsername.isNotBlank() ->
+                        "Sync Bidirezionale Live: @$malUsername 🔄"
+                      malUsername.isNotBlank() ->
+                        "Profilo MyAnimeList: @$malUsername (Lettura Live)"
+                      else ->
+                        "Sincronizza con MyAnimeList in Tempo Reale ⛩️"
                     },
                     color = TextPrimary,
                     fontWeight = FontWeight.Bold,
                     fontSize = 13.sp
                   )
                   Text(
-                    text = "Importa anime visti, voti ed episodi da MAL",
-                    color = TextSecondary,
+                    text = if (isTwoWayMalActive) {
+                      "App ↔ MAL attivi: voti, episodi e liste si aggiornano a vicenda!"
+                    } else {
+                      "Tocca per sincronizzare o attivare l'aggiornamento bidirezionale App ↔ MAL"
+                    },
+                    color = if (isTwoWayMalActive) LikeGreen else TextSecondary,
                     fontSize = 11.sp
                   )
                 }
@@ -2195,7 +2247,7 @@ private fun WatchedSection(
               Icon(
                 imageVector = Icons.Default.Sync,
                 contentDescription = "Sincronizza MAL",
-                tint = MalBlueLight
+                tint = if (isTwoWayMalActive) LikeGreen else MalBlueLight
               )
             }
           }
@@ -2221,7 +2273,13 @@ private fun WatchedSection(
                   modifier = Modifier.weight(1f)
                 )
                 Button(
-                  onClick = { onImportMal(malInput.ifBlank { "Symon180" }) },
+                  onClick = {
+                    if (tokenInput.isNotBlank()) {
+                      onConnectMalTwoWay(malInput.ifBlank { "Symon180" }, tokenInput)
+                    } else {
+                      onImportMal(malInput.ifBlank { "Symon180" })
+                    }
+                  },
                   enabled = !isSyncingMal,
                   colors = ButtonDefaults.buttonColors(
                     containerColor = MalBlue,
@@ -2235,7 +2293,152 @@ private fun WatchedSection(
                       strokeWidth = 2.dp
                     )
                   } else {
-                    Text("Importa", fontWeight = FontWeight.Bold)
+                    Text("Sync Ora 🔄", fontWeight = FontWeight.Bold)
+                  }
+                }
+              }
+
+              Spacer(modifier = Modifier.height(8.dp))
+
+              // Pulsante per espandere la configurazione Bidirezionale (App <-> MAL API v2)
+              Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+              ) {
+                OutlinedButton(
+                  onClick = { showTwoWaySetup = !showTwoWaySetup },
+                  border = BorderStroke(1.dp, if (isTwoWayMalActive) LikeGreen else MalBlueLight),
+                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                  modifier = Modifier.height(34.dp)
+                ) {
+                  Text(
+                    text = if (isTwoWayMalActive) {
+                      "🔄 Sync Bidirezionale Attivo (Configura)"
+                    } else {
+                      "⚡ Attiva Sync Bidirezionale (App ↔ MAL)"
+                    },
+                    color = if (isTwoWayMalActive) LikeGreen else MalBlueLight,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                  )
+                }
+
+                if (malUsername.isNotBlank() || isTwoWayMalActive) {
+                  OutlinedButton(
+                    onClick = onDisconnectMal,
+                    border = BorderStroke(1.dp, SkipRed.copy(alpha = 0.6f)),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.height(34.dp)
+                  ) {
+                    Text("Scollega", color = SkipRed, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                  }
+                }
+              }
+
+              AnimatedVisibility(visible = showTwoWaySetup) {
+                Surface(
+                  color = CinemaCardSurface,
+                  shape = RoundedCornerShape(12.dp),
+                  border = BorderStroke(1.dp, MalBlueLight.copy(alpha = 0.4f)),
+                  modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+                ) {
+                  Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                      text = "🔄 Sincronizzazione Bidirezionale in Tempo Reale (App ↔ MAL)",
+                      color = TextPrimary,
+                      fontWeight = FontWeight.Bold,
+                      fontSize = 12.sp
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                      text = "Con OAuth2 attivo, quando fai Swipe a destra (❤️ Plan to Watch), Swipe in alto (✅ Completed), spunti un episodio o dai un voto nell'app, il tuo account MyAnimeList si aggiorna in tempo reale (e viceversa ad ogni apertura)!",
+                      color = TextSecondary,
+                      fontSize = 11.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Metodo 1: Login OAuth2 PKCE tramite Client ID
+                    Row(
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                      OutlinedTextField(
+                        value = clientIdInput,
+                        onValueChange = { clientIdInput = it },
+                        placeholder = { Text("Client ID MAL (myanimelist.net/apiconfig)") },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                          focusedBorderColor = MalBlueLight,
+                          unfocusedBorderColor = CinemaSurface,
+                          focusedContainerColor = CinemaSurface,
+                          unfocusedContainerColor = CinemaSurface
+                        ),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.weight(1f)
+                      )
+                      Button(
+                        onClick = {
+                          if (clientIdInput.isNotBlank()) {
+                            onStartMalOAuth(clientIdInput)
+                          } else {
+                            runCatching {
+                              context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse("https://myanimelist.net/apiconfig"))
+                              )
+                            }
+                          }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                          containerColor = MalBlueLight,
+                          contentColor = Color.Black
+                        )
+                      ) {
+                        Text(
+                          text = if (clientIdInput.isNotBlank()) "Login OAuth ⛩️" else "Crea ID",
+                          fontWeight = FontWeight.Bold,
+                          fontSize = 11.sp
+                        )
+                      }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Metodo 2: Access Token OAuth2 diretto
+                    Row(
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                      OutlinedTextField(
+                        value = tokenInput,
+                        onValueChange = { tokenInput = it },
+                        placeholder = { Text("Oppure incolla Access Token OAuth2 MAL...") },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                          focusedBorderColor = LikeGreen,
+                          unfocusedBorderColor = CinemaSurface,
+                          focusedContainerColor = CinemaSurface,
+                          unfocusedContainerColor = CinemaSurface
+                        ),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.weight(1f)
+                      )
+                      Button(
+                        onClick = {
+                          onConnectMalTwoWay(malInput.ifBlank { "Symon180" }, tokenInput)
+                        },
+                        enabled = tokenInput.isNotBlank() && !isSyncingMal,
+                        colors = ButtonDefaults.buttonColors(
+                          containerColor = LikeGreen,
+                          contentColor = Color.Black
+                        )
+                      ) {
+                        Text("Attiva ↔", fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                      }
+                    }
                   }
                 }
               }

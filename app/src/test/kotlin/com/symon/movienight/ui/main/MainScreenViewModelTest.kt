@@ -31,6 +31,9 @@ import org.junit.Test
  * Repository finto ("Fake") per testare il ViewModel in modo istantaneo e deterministico.
  */
 private class FakeMovieRepository : MovieRepository {
+  val pushedMalUpdates = mutableListOf<String>()
+  val deletedMalIds = mutableListOf<Int>()
+
   override suspend fun getCatalog(
     genreFilter: MovieGenreFilter,
     mediaType: MediaType,
@@ -64,7 +67,10 @@ private class FakeMovieRepository : MovieRepository {
     return CuratedImdbCatalog.forType(mediaType).filter { it.title.contains(query, ignoreCase = true) }
   }
 
-  override suspend fun importMyAnimeListProfile(username: String): MalUserImportResult {
+  override suspend fun importMyAnimeListProfile(
+    username: String,
+    accessToken: String?
+  ): MalUserImportResult {
     return MalUserImportResult(
       username = username,
       entries = listOf(
@@ -81,8 +87,28 @@ private class FakeMovieRepository : MovieRepository {
           watchedEpisodesCount = 0
         )
       ),
-      message = "Sincronizzato @$username"
+      message = "Sincronizzato @$username",
+      isTwoWayAuthenticated = !accessToken.isNullOrBlank()
     )
+  }
+
+  override suspend fun pushMalAnimeStatus(
+    accessToken: String,
+    malId: Int,
+    status: String,
+    score: Int?,
+    numWatchedEpisodes: Int?
+  ): Boolean {
+    pushedMalUpdates.add("$malId:$status:${score ?: -1}:${numWatchedEpisodes ?: -1}")
+    return true
+  }
+
+  override suspend fun deleteMalAnimeEntry(
+    accessToken: String,
+    malId: Int
+  ): Boolean {
+    deletedMalIds.add(malId)
+    return true
   }
 }
 
@@ -315,5 +341,57 @@ class MainScreenViewModelTest {
       "Leonardo DiCaprio deve avere l'URL della sua foto ritratto",
       castMembers.first().photoUrl.startsWith("https://")
     )
+  }
+
+  @Test
+  fun `sincronizzazione bidirezionale MyAnimeList invia in tempo reale aggiunte voti ed episodi su MAL`() = runTest {
+    val fakeRepo = FakeMovieRepository()
+    val viewModel = MovieNightViewModel(fakeRepo, InMemoryLibraryStorage())
+
+    // 1. Colleghiamo l'account MyAnimeList con token OAuth2 bidirezionale
+    viewModel.connectMalWithAccessToken("Symon180", "oauth_test_token_123")
+    assertTrue("La sincronizzazione bidirezionale deve risultare attiva", viewModel.uiState.value.isTwoWayMalActive)
+
+    // 2. Aggiungiamo Attack on Titan (malId = 16498) alla lista Da Vedere -> deve inviare plan_to_watch a MAL!
+    val aot = CuratedImdbCatalog.anime.first { it.malId == 16498 }
+    viewModel.addToWatchlist(aot)
+    assertTrue(
+      "L'aggiunta in Watchlist deve inviare plan_to_watch a MyAnimeList",
+      fakeRepo.pushedMalUpdates.any { it.startsWith("16498:plan_to_watch:") }
+    )
+
+    // 3. Spuntiamo un episodio di Attack on Titan -> deve inviare watching e num_watched_episodes = 1 a MAL!
+    viewModel.toggleEpisodeWatched(aot, aot.episodes.first().id)
+    assertTrue(
+      "Spuntare un episodio deve aggiornare subito MyAnimeList a watching con 1 episodio",
+      fakeRepo.pushedMalUpdates.any { it.startsWith("16498:watching:") && it.endsWith(":1") }
+    )
+
+    // 4. Diamo un voto (9/10) -> deve inviare subito score = 9 a MAL!
+    viewModel.rateMedia(aot.id, 9)
+    assertTrue(
+      "Votare un anime nell'app deve aggiornare il voto su MyAnimeList",
+      fakeRepo.pushedMalUpdates.any { it.contains("16498:") && it.contains(":9:") }
+    )
+
+    // 5. Rimuoviamo dalla lista -> deve inviare DELETE a MAL!
+    viewModel.removeFromLiked(aot)
+    assertTrue("Rimuovere un anime deve cancellarlo anche su MAL", 16498 in fakeRepo.deletedMalIds)
+  }
+
+  @Test
+  fun `paginazione infinita del mazzo e generazione URL OAuth2 PKCE MyAnimeList`() = runTest {
+    val fakeRepo = FakeMovieRepository()
+    val viewModel = MovieNightViewModel(fakeRepo, InMemoryLibraryStorage())
+
+    assertEquals(1, viewModel.uiState.value.currentPage)
+    viewModel.loadMoreDeck()
+    assertEquals("Il caricamento pagina successiva incrementa currentPage a 2", 2, viewModel.uiState.value.currentPage)
+
+    val oauthUrl = viewModel.prepareMalOAuthLoginUrl("my_test_client_id")
+    assertTrue(oauthUrl.startsWith("https://myanimelist.net/v1/oauth2/authorize?"))
+    assertTrue(oauthUrl.contains("client_id=my_test_client_id"))
+    assertTrue(oauthUrl.contains("code_challenge_method=plain"))
+    assertEquals(64, viewModel.uiState.value.malCodeVerifier.length)
   }
 }

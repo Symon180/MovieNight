@@ -22,7 +22,10 @@ data class LibrarySnapshot(
   val watched: List<Movie> = emptyList(),
   val dislikedIds: Set<String> = emptySet(),
   val progress: Map<String, UserMediaProgress> = emptyMap(),
-  val malUsername: String = ""
+  val malUsername: String = "",
+  val malAccessToken: String = "",
+  val malClientId: String = "",
+  val malCodeVerifier: String = ""
 )
 
 /**
@@ -74,12 +77,18 @@ class SharedPreferencesLibraryStorage(context: Context) : LibraryStorage {
       }
       val progress = parseProgressMap(root.optJSONObject("progress"))
       val malUser = root.optString("malUsername", "")
+      val malToken = root.optString("malAccessToken", "")
+      val malClient = root.optString("malClientId", "")
+      val malVerifier = root.optString("malCodeVerifier", "")
       LibrarySnapshot(
         watchlist = watchlist,
         watched = watched,
         dislikedIds = dislikedSet,
         progress = progress,
-        malUsername = malUser
+        malUsername = malUser,
+        malAccessToken = malToken,
+        malClientId = malClient,
+        malCodeVerifier = malVerifier
       )
     } catch (_: Exception) {
       LibrarySnapshot()
@@ -94,6 +103,9 @@ class SharedPreferencesLibraryStorage(context: Context) : LibraryStorage {
         put("dislikedIds", JSONArray(snapshot.dislikedIds.toList()))
         put("progress", serializeProgressMap(snapshot.progress))
         put("malUsername", snapshot.malUsername)
+        put("malAccessToken", snapshot.malAccessToken)
+        put("malClientId", snapshot.malClientId)
+        put("malCodeVerifier", snapshot.malCodeVerifier)
       }
       prefs.edit().putString(KEY_SNAPSHOT_JSON, root.toString()).apply()
     } catch (_: Exception) {

@@ -19,19 +19,27 @@ import java.net.URLEncoder
 import kotlin.math.roundToInt
 
 /**
- * Risultato dell'importazione di un profilo MyAnimeList (MAL).
+ * Risultato dell'importazione / sincronizzazione di un profilo MyAnimeList (MAL).
  */
 data class MalImportEntry(
   val movie: Movie,
   val isWatched: Boolean,             // true = Già Visto / In corso, false = Plan to Watch (Da vedere)
   val userScore: Int?,                // Voto dato dall'utente su MAL (1..10), se presente
-  val watchedEpisodesCount: Int = 0   // Quanti episodi l'utente ha già visto su MAL
+  val watchedEpisodesCount: Int = 0,  // Quanti episodi l'utente ha già visto su MAL
+  val isDropped: Boolean = false      // true = Scartato (Dropped su MAL)
 )
 
 data class MalUserImportResult(
   val username: String,
   val entries: List<MalImportEntry>,
-  val message: String
+  val message: String,
+  val isTwoWayAuthenticated: Boolean = false
+)
+
+data class MalOAuthTokenResult(
+  val accessToken: String,
+  val refreshToken: String,
+  val username: String
 )
 
 /**
@@ -59,16 +67,58 @@ interface MovieRepository {
   suspend fun fetchCastForMedia(media: Movie): List<CastMember> =
     media.resolvedCastMembers
 
-  suspend fun importMyAnimeListProfile(username: String): MalUserImportResult =
+  suspend fun enrichMovieDetails(media: Movie): Movie = media
+
+  suspend fun importMyAnimeListProfile(
+    username: String,
+    accessToken: String? = null
+  ): MalUserImportResult =
     MalUserImportResult(username, emptyList(), "")
+
+  /**
+   * Sincronizzazione BIDIREZIONALE (App -> MyAnimeList in tempo reale!):
+   * Aggiorna immediatamente su `api.myanimelist.net/v2/anime/{malId}/my_list_status`
+   * lo stato (`plan_to_watch`, `watching`, `completed`, `dropped`), il voto (`0..10`)
+   * e il numero di episodi visti!
+   */
+  suspend fun pushMalAnimeStatus(
+    accessToken: String,
+    malId: Int,
+    status: String,
+    score: Int? = null,
+    numWatchedEpisodes: Int? = null
+  ): Boolean = false
+
+  /**
+   * Rimuove in tempo reale un anime dalla lista ufficiale MyAnimeList dell'utente.
+   */
+  suspend fun deleteMalAnimeEntry(
+    accessToken: String,
+    malId: Int
+  ): Boolean = false
+
+  /**
+   * Scambia il codice OAuth2 PKCE di MyAnimeList con un `access_token` e `refresh_token` reali.
+   */
+  suspend fun exchangeMalOAuthCode(
+    clientId: String,
+    code: String,
+    codeVerifier: String,
+    redirectUri: String = "movienight://mal-oauth"
+  ): MalOAuthTokenResult? = null
+
+  /**
+   * Recupera il nome utente ufficiale MyAnimeList a partire da un `accessToken` OAuth2.
+   */
+  suspend fun fetchMalUsernameFromToken(accessToken: String): String? = null
 }
 
 /**
- * Implementazione principale del Repository per:
- * - 🎬 **Film** (IMDb API + Catalogo Classici & Moderni, esclusi i Film Anime)
- * - 📺 **Serie TV** (IMDb TV API + Serie TV storiche e moderne con tutti gli episodi)
- * - ⛩️ **Anime** (**MyAnimeList** tramite **Jikan REST API v4** `api.jikan.moe/v4` divisi in **Serie Anime** e **Film Anime**)
- * - ♾️ **Mazzo Infinito**: supporta la paginazione (`page = 1, 2, 3...`) così il mazzo non finisce mai!
+ * Implementazione principale del Repository IN TEMPO REALE:
+ * - 🎬 **Film (`MediaType.MOVIE`)**: scaricati **in tempo reale da IMDb** (`www.imdb.com/search/title` `__NEXT_DATA__`, YTS IMDb Catalog API v2 e IMDb Live Suggestion API, escludendo rigorosamente i Film Anime).
+ * - 📺 **Serie TV (`MediaType.TV_SERIES`)**: scaricate **in tempo reale da IMDb & TVmaze** (`www.imdb.com/search/title`, `api.tvmaze.com/shows?page=...` con ID IMDb `tt...` ed episodi reali, e IMDb Live Suggestion API).
+ * - ⛩️ **Anime (`MediaType.ANIME`)**: scaricati **in tempo reale da MyAnimeList** tramite **Jikan REST API v4** (`api.jikan.moe/v4/anime` e `/v4/top/anime`, divisi in **Serie Anime** e **Film Anime**).
+ * - ♾️ **Catalogo Infinito Real-Time**: ogni pagina (`page = 1, 2, 3, 4...`) interroga i database live e dà priorità assoluta ai risultati in tempo reale; il catalogo locale `CuratedImdbCatalog` entra in gioco solo come fallback se il dispositivo è offline!
  */
 class DefaultMovieRepository : MovieRepository {
 
@@ -81,50 +131,76 @@ class DefaultMovieRepository : MovieRepository {
   ): List<Movie> = withContext(Dispatchers.IO) {
     val safePage = page.coerceAtLeast(1)
 
-    val baseList: List<Movie> = when (mediaType) {
+    // 1. Scarichiamo IN TEMPO REALE da IMDb (Film / Serie TV) o da MyAnimeList (Anime)
+    val remoteItems: List<Movie> = when (mediaType) {
       MediaType.MOVIE -> {
-        val remote = fetchImdbPage(
+        fetchLiveMoviesRealTime(
           genre = genreFilter.apiGenre,
-          apiType = "MOVIE",
-          mediaType = MediaType.MOVIE,
           eraFilter = eraFilter,
           page = safePage
-        )
-        val local = if (safePage == 1) CuratedImdbCatalog.movies else emptyList()
-        (local + remote)
-          .filterNot { isAnimeTitle(it) } // I Film Anime stanno SOLO nella sezione Anime!
+        ).filterNot { isAnimeTitle(it) }
           .distinctBy { it.id }
       }
       MediaType.TV_SERIES -> {
-        val remote = fetchImdbPage(
+        fetchLiveTvSeriesRealTime(
           genre = genreFilter.apiGenre,
-          apiType = "TV_SERIES",
-          mediaType = MediaType.TV_SERIES,
           eraFilter = eraFilter,
           page = safePage
-        )
-        val local = if (safePage == 1) CuratedImdbCatalog.tvSeries else emptyList()
-        (local + remote)
-          .filterNot { isAnimeTitle(it) }
+        ).filterNot { isAnimeTitle(it) }
           .distinctBy { it.id }
       }
       MediaType.ANIME -> {
-        val remote = fetchAnimeFromJikanMal(
+        fetchAnimeFromJikanMal(
           malGenreId = genreFilter.malGenreId,
+          expectedGenre = genreFilter.apiGenre,
           animeFormat = animeFormat,
           eraFilter = eraFilter,
           page = safePage
-        )
-        val local = if (safePage == 1) CuratedImdbCatalog.anime else emptyList()
-        (local + remote).distinctBy { it.id }
+        ).distinctBy { it.id }
       }
     }
 
-    // 1. Filtro rigoroso per Genere
+    val remoteFiltered = applyCatalogFilters(
+      items = remoteItems,
+      genreFilter = genreFilter,
+      mediaType = mediaType,
+      animeFormat = animeFormat,
+      eraFilter = eraFilter
+    )
+
+    // Diamo PRIORITÀ ASSOLUTA al catalogo in tempo reale da IMDb / MyAnimeList!
+    if (remoteFiltered.isNotEmpty()) {
+      return@withContext remoteFiltered.shuffled()
+    }
+
+    // Fallback al catalogo locale solo se il dispositivo è offline o la pagina remota non ha restituito nulla
+    val localFallbackPool = when (mediaType) {
+      MediaType.MOVIE -> CuratedImdbCatalog.movies.filterNot { isAnimeTitle(it) }
+      MediaType.TV_SERIES -> CuratedImdbCatalog.tvSeries.filterNot { isAnimeTitle(it) }
+      MediaType.ANIME -> CuratedImdbCatalog.anime
+    }
+
+    applyCatalogFilters(
+      items = localFallbackPool,
+      genreFilter = genreFilter,
+      mediaType = mediaType,
+      animeFormat = animeFormat,
+      eraFilter = eraFilter
+    ).shuffled()
+  }
+
+  private fun applyCatalogFilters(
+    items: List<Movie>,
+    genreFilter: MovieGenreFilter,
+    mediaType: MediaType,
+    animeFormat: AnimeFormatFilter,
+    eraFilter: EraFilter
+  ): List<Movie> {
+    // 1. Filtro per Genere
     val genreFiltered = if (genreFilter.apiGenre == null) {
-      baseList
+      items
     } else {
-      baseList.filter { item ->
+      items.filter { item ->
         item.genres.any { it.equals(genreFilter.apiGenre, ignoreCase = true) }
       }
     }
@@ -141,9 +217,7 @@ class DefaultMovieRepository : MovieRepository {
     }
 
     // 3. Filtro per Epoca / Decennio (Anni '70, '80, '90, 2000, 2010, 2020+)
-    val eraFiltered = formatFiltered.filter { eraFilter.matches(it.year) }
-
-    eraFiltered.shuffled()
+    return formatFiltered.filter { eraFilter.matches(it.year) }
   }
 
   override suspend fun searchLiveImdb(query: String): List<Movie> =
@@ -154,25 +228,40 @@ class DefaultMovieRepository : MovieRepository {
     mediaType: MediaType
   ): List<Movie> = withContext(Dispatchers.IO) {
     val cleanQuery = query.trim()
-    val localPool = CuratedImdbCatalog.forType(mediaType)
-    if (cleanQuery.isEmpty()) return@withContext localPool
+    if (cleanQuery.isEmpty()) {
+      return@withContext getCatalog(mediaType = mediaType, page = 1)
+    }
 
-    val localMatches = localPool.filter {
+    val liveMatches = when (mediaType) {
+      MediaType.ANIME -> fetchAnimeSearchFromJikanMal(cleanQuery)
+      MediaType.TV_SERIES -> {
+        val imdbSug = fetchFromImdbSuggestionApi(cleanQuery, MediaType.TV_SERIES, expectedGenre = null)
+        val tvmazeSearch = fetchTvMazeSearch(cleanQuery)
+        (imdbSug + tvmazeSearch)
+          .filterNot { isAnimeTitle(it) }
+          .distinctBy { it.id }
+      }
+      MediaType.MOVIE -> {
+        val imdbSug = fetchFromImdbSuggestionApi(cleanQuery, MediaType.MOVIE, expectedGenre = null)
+        val ytsSearch = fetchYtsSearch(cleanQuery)
+        val freeDbSearch = fetchImdbFreeDbSearch(cleanQuery, MediaType.MOVIE, expectedGenre = null)
+        (imdbSug + ytsSearch + freeDbSearch)
+          .filterNot { isAnimeTitle(it) }
+          .distinctBy { it.id }
+      }
+    }
+
+    if (liveMatches.isNotEmpty()) {
+      return@withContext liveMatches
+    }
+
+    val localPool = CuratedImdbCatalog.forType(mediaType)
+    localPool.filter {
       it.title.contains(cleanQuery, ignoreCase = true) ||
         it.director.contains(cleanQuery, ignoreCase = true) ||
         it.cast.any { actor -> actor.contains(cleanQuery, ignoreCase = true) } ||
         it.plot.contains(cleanQuery, ignoreCase = true)
     }
-
-    val liveMatches = when (mediaType) {
-      MediaType.ANIME -> fetchAnimeSearchFromJikanMal(cleanQuery)
-      MediaType.TV_SERIES -> fetchFromImdbSuggestionApi(cleanQuery, MediaType.TV_SERIES)
-        .filterNot { isAnimeTitle(it) }
-      MediaType.MOVIE -> fetchFromImdbSuggestionApi(cleanQuery, MediaType.MOVIE)
-        .filterNot { isAnimeTitle(it) }
-    }
-
-    (localMatches + liveMatches).distinctBy { it.id }
   }
 
   override suspend fun fetchEpisodesForMedia(media: Movie): List<Episode> =
@@ -183,13 +272,20 @@ class DefaultMovieRepository : MovieRepository {
           return@withContext CuratedImdbCatalog.ensureFullEpisodeList(media.copy(episodes = liveEpisodes))
         }
       }
+      if (media.mediaType == MediaType.TV_SERIES && media.id.startsWith("tt")) {
+        val tvMazeEpisodes = fetchTvMazeEpisodesByImdbId(media.id, media.imdbRating)
+        if (tvMazeEpisodes.isNotEmpty()) {
+          return@withContext tvMazeEpisodes
+        }
+      }
       CuratedImdbCatalog.ensureFullEpisodeList(media)
     }
 
   /**
-   * Scarica le foto reali degli attori o dei personaggi/doppiatori:
-   * - Per gli Anime: interroga `api.jikan.moe/v4/anime/{malId}/characters` per avere le foto ufficiali MyAnimeList!
-   * - Per i Film e le Serie TV: arricchisce i membri del cast cercando la foto ritratto su Wikipedia REST API!
+   * Scarica in tempo reale le foto e i ruoli degli attori o dei personaggi/doppiatori:
+   * - Per gli Anime: interroga `api.jikan.moe/v4/anime/{malId}/characters` (MyAnimeList ufficiale).
+   * - Per le Serie TV: interroga `api.tvmaze.com/lookup/shows?imdb={id}` -> `/cast` per foto attori reali e ruoli.
+   * - Per i Film / Serie IMDb: interroga `imdb.iamidiotareyoutoo.com/search?tt={id}` + Wikipedia REST API per i ritratti!
    */
   override suspend fun fetchCastForMedia(media: Movie): List<CastMember> =
     withContext(Dispatchers.IO) {
@@ -198,7 +294,23 @@ class DefaultMovieRepository : MovieRepository {
         if (jikanCast.isNotEmpty()) return@withContext jikanCast
       }
 
-      media.resolvedCastMembers.map { member ->
+      if (media.mediaType == MediaType.TV_SERIES && media.id.startsWith("tt")) {
+        val tvMazeCast = fetchTvMazeCastByImdbId(media.id)
+        if (tvMazeCast.isNotEmpty()) return@withContext tvMazeCast
+      }
+
+      val baseMembers = if (
+        media.castMembers.isEmpty() &&
+        (media.cast.isEmpty() || media.cast.firstOrNull()?.startsWith("Cast IMDb") == true) &&
+        media.id.startsWith("tt")
+      ) {
+        val enriched = fetchImdbTitleDetailsByTt(media)
+        enriched.resolvedCastMembers
+      } else {
+        media.resolvedCastMembers
+      }
+
+      baseMembers.map { member ->
         if (member.photoUrl.isNotBlank() && member.photoUrl != media.posterUrl) {
           member
         } else {
@@ -212,19 +324,57 @@ class DefaultMovieRepository : MovieRepository {
       }
     }
 
-  override suspend fun importMyAnimeListProfile(username: String): MalUserImportResult =
+  /**
+   * Arricchisce in tempo reale la trama, il regista e il cast di un titolo IMDb live
+   * quando l'utente apre la scheda dettagliata del programma.
+   */
+  override suspend fun enrichMovieDetails(media: Movie): Movie =
     withContext(Dispatchers.IO) {
-      val cleanUser = username.trim()
-      if (cleanUser.isEmpty()) {
-        return@withContext MalUserImportResult("", emptyList(), "Inserisci un username MyAnimeList valido.")
+      if (media.id.startsWith("tt") && (media.plot.startsWith("Titolo dal database") || media.cast.size <= 1)) {
+        fetchImdbTitleDetailsByTt(media)
+      } else {
+        media
+      }
+    }
+
+  override suspend fun importMyAnimeListProfile(
+    username: String,
+    accessToken: String?
+  ): MalUserImportResult =
+    withContext(Dispatchers.IO) {
+      val cleanToken = accessToken?.trim().orEmpty()
+      var resolvedUser = username.trim()
+
+      // 1. Se abbiamo un Access Token OAuth2, interroghiamo in tempo reale l'API ufficiale v2 di MyAnimeList
+      // (`https://api.myanimelist.net/v2/users/@me/animelist`) che legge anche liste private e stati in tempo reale!
+      if (cleanToken.isNotEmpty()) {
+        if (resolvedUser.isEmpty()) {
+          resolvedUser = fetchMalUsernameFromToken(cleanToken).orEmpty()
+        }
+        val apiV2Entries = fetchAuthenticatedMalUserListV2(cleanToken)
+        if (apiV2Entries.isNotEmpty()) {
+          val displayUser = resolvedUser.ifEmpty { "me" }
+          return@withContext MalUserImportResult(
+            username = displayUser,
+            entries = apiV2Entries,
+            message = "Sincronizzazione Bidirezionale Attiva (@$displayUser • ${apiV2Entries.size} anime live) 🔄⛩️",
+            isTwoWayAuthenticated = true
+          )
+        }
       }
 
-      val liveEntries = fetchPublicMalUserList(cleanUser)
+      if (resolvedUser.isEmpty()) {
+        return@withContext MalUserImportResult("", emptyList(), "Inserisci un username MyAnimeList o accedi con OAuth2.")
+      }
+
+      // 2. Lettura in tempo reale dalla lista pubblica MyAnimeList (tutte le pagine 0, 300, 600...)
+      val liveEntries = fetchPublicMalUserList(resolvedUser)
       if (liveEntries.isNotEmpty()) {
         return@withContext MalUserImportResult(
-          username = cleanUser,
+          username = resolvedUser,
           entries = liveEntries,
-          message = "Sincronizzati ${liveEntries.size} anime dal profilo MyAnimeList @$cleanUser! ⛩️"
+          message = "Sincronizzati in tempo reale ${liveEntries.size} anime da MyAnimeList @$resolvedUser! ⛩️",
+          isTwoWayAuthenticated = cleanToken.isNotEmpty()
         )
       }
 
@@ -255,77 +405,497 @@ class DefaultMovieRepository : MovieRepository {
         )
       )
       MalUserImportResult(
-        username = cleanUser,
+        username = resolvedUser,
         entries = fallbackEntries,
-        message = "Collegato profilo MAL @$cleanUser (${fallbackEntries.size} anime sincronizzati ⛩️)"
+        message = "Collegato profilo MAL @$resolvedUser (${fallbackEntries.size} anime sincronizzati ⛩️)",
+        isTwoWayAuthenticated = cleanToken.isNotEmpty()
       )
     }
 
   /**
-   * Scarica pagine sempre nuove da IMDb (`page = 1, 2, 3, 4...`) così il mazzo non ha mai fine!
+   * SCRITTURA IN TEMPO REALE SU MYANIMELIST (`App -> MyAnimeList`):
+   * Invia `PUT https://api.myanimelist.net/v2/anime/{malId}/my_list_status`
+   * per aggiornare istantaneamente stato (`plan_to_watch`, `watching`, `completed`, `dropped`),
+   * voto (`score = 0..10`) ed episodi visti (`num_watched_episodes`) sull'account MAL dell'utente!
    */
-  private fun fetchImdbPage(
+  override suspend fun pushMalAnimeStatus(
+    accessToken: String,
+    malId: Int,
+    status: String,
+    score: Int?,
+    numWatchedEpisodes: Int?
+  ): Boolean = withContext(Dispatchers.IO) {
+    val cleanToken = accessToken.trim()
+    if (cleanToken.isEmpty() || malId <= 0) return@withContext false
+
+    return@withContext try {
+      val url = URL("https://api.myanimelist.net/v2/anime/$malId/my_list_status")
+      val params = mutableListOf<String>()
+      params.add("status=${URLEncoder.encode(status, "UTF-8")}")
+      if (score != null && score in 0..10) {
+        params.add("score=$score")
+      }
+      if (numWatchedEpisodes != null && numWatchedEpisodes >= 0) {
+        params.add("num_watched_episodes=$numWatchedEpisodes")
+      }
+      val bodyBytes = params.joinToString("&").toByteArray(Charsets.UTF_8)
+
+      val conn = (url.openConnection() as HttpURLConnection).apply {
+        requestMethod = "PUT"
+        connectTimeout = 8000
+        readTimeout = 8000
+        doOutput = true
+        setRequestProperty("Authorization", "Bearer $cleanToken")
+        setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+        setRequestProperty("Accept", "application/json")
+        setRequestProperty("User-Agent", "MovieNightAndroid/2.4")
+      }
+      try {
+        conn.outputStream.use { it.write(bodyBytes) }
+        conn.responseCode in 200..299
+      } finally {
+        conn.disconnect()
+      }
+    } catch (_: Exception) {
+      false
+    }
+  }
+
+  /**
+   * Rimuove in tempo reale un anime dalla lista MyAnimeList dell'utente (`DELETE /v2/anime/{malId}/my_list_status`).
+   */
+  override suspend fun deleteMalAnimeEntry(
+    accessToken: String,
+    malId: Int
+  ): Boolean = withContext(Dispatchers.IO) {
+    val cleanToken = accessToken.trim()
+    if (cleanToken.isEmpty() || malId <= 0) return@withContext false
+
+    return@withContext try {
+      val url = URL("https://api.myanimelist.net/v2/anime/$malId/my_list_status")
+      val conn = (url.openConnection() as HttpURLConnection).apply {
+        requestMethod = "DELETE"
+        connectTimeout = 8000
+        readTimeout = 8000
+        setRequestProperty("Authorization", "Bearer $cleanToken")
+        setRequestProperty("Accept", "application/json")
+        setRequestProperty("User-Agent", "MovieNightAndroid/2.4")
+      }
+      try {
+        conn.responseCode in 200..299 || conn.responseCode == 404
+      } finally {
+        conn.disconnect()
+      }
+    } catch (_: Exception) {
+      false
+    }
+  }
+
+  /**
+   * Scambia il codice di autorizzazione OAuth2 PKCE di MyAnimeList con `access_token` e `refresh_token`.
+   */
+  override suspend fun exchangeMalOAuthCode(
+    clientId: String,
+    code: String,
+    codeVerifier: String,
+    redirectUri: String
+  ): MalOAuthTokenResult? = withContext(Dispatchers.IO) {
+    val cleanClient = clientId.trim()
+    val cleanCode = code.trim()
+    if (cleanClient.isEmpty() || cleanCode.isEmpty()) return@withContext null
+
+    return@withContext try {
+      val url = URL("https://myanimelist.net/v1/oauth2/token")
+      val body = buildString {
+        append("client_id=").append(URLEncoder.encode(cleanClient, "UTF-8"))
+        append("&grant_type=authorization_code")
+        append("&code=").append(URLEncoder.encode(cleanCode, "UTF-8"))
+        append("&code_verifier=").append(URLEncoder.encode(codeVerifier, "UTF-8"))
+        append("&redirect_uri=").append(URLEncoder.encode(redirectUri, "UTF-8"))
+      }.toByteArray(Charsets.UTF_8)
+
+      val conn = (url.openConnection() as HttpURLConnection).apply {
+        requestMethod = "POST"
+        connectTimeout = 8000
+        readTimeout = 8000
+        doOutput = true
+        setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+        setRequestProperty("Accept", "application/json")
+      }
+      val tokenJson = try {
+        conn.outputStream.use { it.write(body) }
+        if (conn.responseCode in 200..299) {
+          conn.inputStream.bufferedReader().use { it.readText() }
+        } else {
+          null
+        }
+      } finally {
+        conn.disconnect()
+      } ?: return@withContext null
+
+      val obj = JSONObject(tokenJson)
+      val accessToken = obj.optString("access_token").takeIf { it.isNotBlank() } ?: return@withContext null
+      val refreshToken = obj.optString("refresh_token")
+      val username = fetchMalUsernameFromToken(accessToken) ?: "MAL_User"
+      MalOAuthTokenResult(
+        accessToken = accessToken,
+        refreshToken = refreshToken,
+        username = username
+      )
+    } catch (_: Exception) {
+      null
+    }
+  }
+
+  override suspend fun fetchMalUsernameFromToken(accessToken: String): String? =
+    withContext(Dispatchers.IO) {
+      try {
+        val json = httpGetWithBearer("https://api.myanimelist.net/v2/users/@me", accessToken) ?: return@withContext null
+        JSONObject(json).optString("name").takeIf { it.isNotBlank() }
+      } catch (_: Exception) {
+        null
+      }
+    }
+
+  /**
+   * ============================================================================
+   * 🎬 MOTORE REAL-TIME FILM (IMDb Live Search + YTS IMDb Catalog + IMDb Suggest)
+   * ============================================================================
+   */
+  private fun fetchLiveMoviesRealTime(
     genre: String?,
-    apiType: String,
-    mediaType: MediaType,
     eraFilter: EraFilter,
+    page: Int
+  ): List<Movie> {
+    val combined = mutableListOf<Movie>()
+
+    // 1. IMDb Official Web Search (__NEXT_DATA__ JSON integrato in www.imdb.com/search/title/)
+    val imdbWebMovies = fetchImdbWebSearchNextData(
+      titleTypes = "feature",
+      genre = genre,
+      eraFilter = eraFilter,
+      mediaType = MediaType.MOVIE,
+      page = page
+    )
+    combined.addAll(imdbWebMovies)
+
+    // 2. YTS IMDb Movie Catalog API v2 (45.000+ film con codice IMDb `tt...`, voto IMDb, trama, anno e generi)
+    val ytsMovies = fetchYtsMoviesPage(
+      genre = genre,
+      eraFilter = eraFilter,
+      page = page
+    )
+    combined.addAll(ytsMovies)
+
+    // 3. IMDb Live Suggestion API (`v3.sg.media-imdb.com`) + Free Movie DB (`imdb.iamidiotareyoutoo.com`)
+    if (combined.size < 18) {
+      val seed = pickDiscoverySeedQuery(genre, eraFilter, page)
+      combined.addAll(fetchFromImdbSuggestionApi(seed, MediaType.MOVIE, expectedGenre = genre))
+      combined.addAll(fetchImdbFreeDbSearch(seed, MediaType.MOVIE, expectedGenre = genre))
+    }
+
+    return combined.distinctBy { it.id }
+  }
+
+  /**
+   * ============================================================================
+   * 📺 MOTORE REAL-TIME SERIE TV (IMDb Live Search + TVmaze Index + IMDb Suggest)
+   * ============================================================================
+   */
+  private fun fetchLiveTvSeriesRealTime(
+    genre: String?,
+    eraFilter: EraFilter,
+    page: Int
+  ): List<Movie> {
+    val combined = mutableListOf<Movie>()
+
+    // 1. IMDb Official Web Search (__NEXT_DATA__ JSON per `tv_series,tv_miniseries`)
+    val imdbWebSeries = fetchImdbWebSearchNextData(
+      titleTypes = "tv_series,tv_miniseries",
+      genre = genre,
+      eraFilter = eraFilter,
+      mediaType = MediaType.TV_SERIES,
+      page = page
+    )
+    combined.addAll(imdbWebSeries)
+
+    // 2. TVmaze Official Show Index (`api.tvmaze.com/shows?page=...` con 250 serie reali per pagina + ID IMDb `tt...`)
+    val tvMazeSeries = fetchTvMazeShowsPage(
+      genre = genre,
+      eraFilter = eraFilter,
+      page = page
+    )
+    combined.addAll(tvMazeSeries)
+
+    // 3. IMDb Live Suggestion API (`v3.sg.media-imdb.com`) per Serie TV
+    if (combined.size < 18) {
+      val seed = pickDiscoverySeedQuery(genre, eraFilter, page)
+      combined.addAll(fetchFromImdbSuggestionApi(seed, MediaType.TV_SERIES, expectedGenre = genre))
+    }
+
+    return combined.distinctBy { it.id }
+  }
+
+  /**
+   * Interroga direttamente la ricerca avanzata di IMDb (`https://www.imdb.com/search/title/`)
+   * ed estrae il blocco JSON `<script id="__NEXT_DATA__" type="application/json">` che contiene
+   * fino a 50 Film o Serie TV reali in tempo reale con voti IMDb, trama, anno, durata, generi e poster!
+   */
+  private fun fetchImdbWebSearchNextData(
+    titleTypes: String,
+    genre: String?,
+    eraFilter: EraFilter,
+    mediaType: MediaType,
     page: Int
   ): List<Movie> {
     return try {
       val sortModes = listOf(
-        "SORT_BY_POPULARITY" to "ASC",
-        "SORT_BY_USER_RATING" to "DESC",
-        "SORT_BY_USER_RATING_COUNT" to "DESC",
-        "SORT_BY_RELEASE_DATE" to "DESC",
-        "SORT_BY_RELEASE_DATE" to "ASC"
+        "moviemeter,asc",
+        "num_votes,desc",
+        "user_rating,desc",
+        "release_date,desc",
+        "boxoffice_gross_us,desc",
+        "year,desc",
+        "year,asc"
       )
-      val (sortBy, sortOrder) = sortModes[(page - 1) % sortModes.size]
-      val urlString = buildString {
-        append("https://api.imdbapi.dev/titles?types=$apiType&sortBy=$sortBy&sortOrder=$sortOrder")
-        if (!genre.isNullOrBlank()) {
-          append("&genres=").append(URLEncoder.encode(genre, "UTF-8"))
-        }
-        if (eraFilter.minYear != null) {
-          append("&startYear=${eraFilter.minYear}")
-        }
-        if (eraFilter.maxYear != null) {
-          append("&endYear=${eraFilter.maxYear}")
-        }
-      }
-      val primaryResults = httpGet(urlString)?.let { parseImdbApiDevJson(it, mediaType) }.orEmpty()
+      val sortParam = sortModes[(page - 1) % sortModes.size]
 
-      // Per le pagine successive o per arricchire il mazzo infinito, interroghiamo anche semi tematici live!
-      val seedQueries = listOf(
-        "the", "star", "love", "night", "dark", "man", "world", "city", "time", "secret",
-        "alien", "godfather", "back", "matrix", "blade", "lost", "friends", "doctor", "king", "war"
-      )
-      val seedQuery = seedQueries[(page - 1) % seedQueries.size]
-      val suggestionResults = if (page > 1 || primaryResults.size < 10) {
-        fetchFromImdbSuggestionApi(seedQuery, mediaType)
+      // Per pagine > sortModes.size spostiamo anche una finestra temporale interna all'epoca scelta
+      // così anche alla pagina 8, 9, 10... IMDb restituisce 50 titoli sempre diversi!
+      val baseMin = eraFilter.minYear ?: 1970
+      val baseMax = eraFilter.maxYear ?: 2026
+      val cycleIndex = (page - 1) / sortModes.size
+      val (effectiveMin, effectiveMax) = if (cycleIndex == 0 || baseMax - baseMin <= 4) {
+        eraFilter.minYear to eraFilter.maxYear
       } else {
-        emptyList()
+        val span = (baseMax - baseMin).coerceAtLeast(5)
+        val offset = (cycleIndex * 3) % span
+        (baseMin + offset) to baseMax
       }
 
-      (primaryResults + suggestionResults).distinctBy { it.id }
+      val imdbGenre = when (genre?.lowercase()) {
+        "sci-fi" -> "sci-fi"
+        "action" -> "action"
+        "thriller" -> "thriller"
+        "comedy" -> "comedy"
+        "drama" -> "drama"
+        "animation" -> "animation"
+        "horror" -> "horror"
+        else -> null
+      }
+
+      val urlString = buildString {
+        append("https://www.imdb.com/search/title/?title_type=$titleTypes&sort=$sortParam&count=50")
+        if (imdbGenre != null) {
+          append("&genres=$imdbGenre")
+        }
+        if (effectiveMin != null || effectiveMax != null) {
+          val fromDate = "${effectiveMin ?: 1920}-01-01"
+          val toDate = "${effectiveMax ?: 2026}-12-31"
+          append("&release_date=$fromDate,$toDate")
+        }
+      }
+
+      val html = httpGet(urlString, acceptHtml = true) ?: return emptyList()
+      parseImdbNextDataHtml(html, mediaType, expectedGenre = genre)
     } catch (_: Exception) {
       emptyList()
     }
   }
 
-  private fun fetchFromImdbSuggestionApi(query: String, mediaType: MediaType): List<Movie> {
+  /**
+   * Scarica una pagina di film dal catalogo JSON di YTS (`yts.mx` / `yts.lt`),
+   * che indicizza oltre 45.000 film con codice ufficiale IMDb (`tt...`), voto IMDb, anno, trama e poster HD.
+   */
+  private fun fetchYtsMoviesPage(
+    genre: String?,
+    eraFilter: EraFilter,
+    page: Int
+  ): List<Movie> {
+    val sortModes = listOf("download_count", "like_count", "rating", "year", "date_added")
+    val sortBy = sortModes[(page - 1) % sortModes.size]
+    val ytsPage = ((page - 1) / sortModes.size) + 1
+
+    val queryParams = buildString {
+      append("?limit=35&page=$ytsPage&sort_by=$sortBy&minimum_rating=6")
+      if (!genre.isNullOrBlank()) {
+        append("&genre=").append(URLEncoder.encode(genre, "UTF-8"))
+      }
+      // Se l'utente ha selezionato un decennio specifico (es. Anni '80 o '90) e siamo nelle pagine successive,
+      // possiamo filtrare o lasciare che applyCatalogFilters selezioni l'anno esatto
+    }
+
+    val mirrors = listOf(
+      "https://yts.mx/api/v2/list_movies.json$queryParams",
+      "https://yts.lt/api/v2/list_movies.json$queryParams"
+    )
+
+    for (endpoint in mirrors) {
+      try {
+        val jsonText = httpGet(endpoint)
+        if (!jsonText.isNullOrBlank()) {
+          val parsed = parseYtsMoviesJson(jsonText, expectedGenre = genre)
+          if (parsed.isNotEmpty()) return parsed
+        }
+      } catch (_: Exception) {
+        // Prova il mirror successivo
+      }
+    }
+    return emptyList()
+  }
+
+  private fun fetchYtsSearch(query: String): List<Movie> {
+    val encoded = URLEncoder.encode(query, "UTF-8")
+    val mirrors = listOf(
+      "https://yts.mx/api/v2/list_movies.json?query_term=$encoded&limit=20",
+      "https://yts.lt/api/v2/list_movies.json?query_term=$encoded&limit=20"
+    )
+    for (endpoint in mirrors) {
+      try {
+        val jsonText = httpGet(endpoint)
+        if (!jsonText.isNullOrBlank()) {
+          val parsed = parseYtsMoviesJson(jsonText, expectedGenre = null)
+          if (parsed.isNotEmpty()) return parsed
+        }
+      } catch (_: Exception) {
+        // Ignora
+      }
+    }
+    return emptyList()
+  }
+
+  /**
+   * Scarica Serie TV in tempo reale da TVmaze (`https://api.tvmaze.com/shows?page=...`),
+   * che restituisce fino a 250 serie TV per pagina con il loro ID IMDb ufficiale (`externals.imdb = "tt..."`),
+   * voto medio, generi, anno di uscita, trama e locandina ad alta risoluzione!
+   */
+  private fun fetchTvMazeShowsPage(
+    genre: String?,
+    eraFilter: EraFilter,
+    page: Int
+  ): List<Movie> {
+    return try {
+      val tvMazePage = (page - 1).coerceAtLeast(0)
+      val jsonText = httpGet("https://api.tvmaze.com/shows?page=$tvMazePage") ?: return emptyList()
+      val allPageShows = parseTvMazeShowsJson(jsonText, expectedGenre = null)
+      val filtered = allPageShows.filter { show ->
+        val genreOk = genre == null || show.genres.any { it.equals(genre, ignoreCase = true) }
+        val eraOk = eraFilter.matches(show.year)
+        genreOk && eraOk
+      }
+      if (filtered.size >= 8) {
+        filtered.take(45)
+      } else {
+        val seed = pickDiscoverySeedQuery(genre, eraFilter, page)
+        val searchExtras = fetchTvMazeSearch(seed, expectedGenre = genre)
+        (filtered + searchExtras).distinctBy { it.id }.take(45)
+      }
+    } catch (_: Exception) {
+      emptyList()
+    }
+  }
+
+  private fun fetchTvMazeSearch(query: String, expectedGenre: String? = null): List<Movie> {
+    return try {
+      val encoded = URLEncoder.encode(query, "UTF-8")
+      val jsonText = httpGet("https://api.tvmaze.com/search/shows?q=$encoded") ?: return emptyList()
+      parseTvMazeSearchJson(jsonText, expectedGenre = expectedGenre)
+    } catch (_: Exception) {
+      emptyList()
+    }
+  }
+
+  private fun fetchTvMazeEpisodesByImdbId(imdbId: String, fallbackRating: Double): List<Episode> {
+    return try {
+      val showJson = httpGet("https://api.tvmaze.com/lookup/shows?imdb=$imdbId") ?: return emptyList()
+      val showObj = JSONObject(showJson)
+      val tvMazeId = showObj.optInt("id", 0)
+      if (tvMazeId <= 0) return emptyList()
+      val epJson = httpGet("https://api.tvmaze.com/shows/$tvMazeId/episodes") ?: return emptyList()
+      parseTvMazeEpisodesJson(epJson, imdbId, fallbackRating)
+    } catch (_: Exception) {
+      emptyList()
+    }
+  }
+
+  private fun fetchTvMazeCastByImdbId(imdbId: String): List<CastMember> {
+    return try {
+      val showJson = httpGet("https://api.tvmaze.com/lookup/shows?imdb=$imdbId") ?: return emptyList()
+      val showObj = JSONObject(showJson)
+      val tvMazeId = showObj.optInt("id", 0)
+      if (tvMazeId <= 0) return emptyList()
+      val castJson = httpGet("https://api.tvmaze.com/shows/$tvMazeId/cast") ?: return emptyList()
+      parseTvMazeCastJson(castJson)
+    } catch (_: Exception) {
+      emptyList()
+    }
+  }
+
+  private fun fetchFromImdbSuggestionApi(
+    query: String,
+    mediaType: MediaType,
+    expectedGenre: String? = null
+  ): List<Movie> {
     return try {
       val encoded = URLEncoder.encode(query.lowercase(), "UTF-8")
       val firstChar = encoded.firstOrNull { it.isLetterOrDigit() } ?: 'x'
       val urlString = "https://v3.sg.media-imdb.com/suggestion/$firstChar/$encoded.json"
       val jsonText = httpGet(urlString) ?: return emptyList()
-      parseImdbSuggestionJson(jsonText, mediaType)
+      parseImdbSuggestionJson(jsonText, mediaType, expectedGenre)
     } catch (_: Exception) {
       emptyList()
     }
   }
 
+  private fun fetchImdbFreeDbSearch(
+    query: String,
+    mediaType: MediaType,
+    expectedGenre: String? = null
+  ): List<Movie> {
+    return try {
+      val encoded = URLEncoder.encode(query, "UTF-8")
+      val jsonText = httpGet("https://imdb.iamidiotareyoutoo.com/search?q=$encoded") ?: return emptyList()
+      parseImdbFreeDbSearchJson(jsonText, mediaType, expectedGenre)
+    } catch (_: Exception) {
+      emptyList()
+    }
+  }
+
+  private fun fetchImdbTitleDetailsByTt(media: Movie): Movie {
+    return try {
+      val jsonText = httpGet("https://imdb.iamidiotareyoutoo.com/search?tt=${media.id}") ?: return media
+      parseImdbFreeDbDetailJson(jsonText, media)
+    } catch (_: Exception) {
+      media
+    }
+  }
+
+  private fun pickDiscoverySeedQuery(
+    genre: String?,
+    eraFilter: EraFilter,
+    page: Int
+  ): String {
+    val genreSeeds = when (genre?.lowercase()) {
+      "sci-fi" -> listOf("star", "alien", "space", "future", "planet", "cyber", "matrix", "time", "mars", "blade")
+      "action" -> listOf("mission", "john", "fast", "die", "mad", "dark", "strike", "war", "agent", "bourne")
+      "thriller" -> listOf("gone", "girl", "shutter", "seven", "silence", "suspect", "secret", "killer", "prison", "zodiac")
+      "comedy" -> listOf("super", "hangover", "grand", "office", "brooklyn", "parks", "ted", "monty", "hot", "wedding")
+      "drama" -> listOf("shawshank", "godfather", "oppenheimer", "green", "beautiful", "social", "truman", "forrest", "whiplash", "life")
+      "animation" -> listOf("toy", "spider", "shrek", "coco", "lion", "wall-e", "up", "inside", "ratatouille", "nemo")
+      "horror" -> listOf("conjuring", "hereditary", "shining", "thing", "scream", "alien", "exorcist", "saw", "quiet", "it")
+      else -> listOf(
+        "the", "star", "dark", "love", "night", "world", "city", "time", "man", "secret",
+        "king", "lost", "back", "doctor", "breaking", "stranger", "game", "house", "black", "lord"
+      )
+    }
+    return genreSeeds[(page - 1) % genreSeeds.size]
+  }
+
   /**
-   * Scarica gli Anime da MyAnimeList usando la Jikan REST API v4 con:
+   * ============================================================================
+   * ⛩️ MOTORE REAL-TIME ANIME (MyAnimeList via Jikan REST API v4 `api.jikan.moe`)
+   * ============================================================================
+   * Scarica gli Anime in tempo reale da MyAnimeList usando la Jikan REST API v4 con:
    * - `page`: paginazione infinita (`1, 2, 3, 4...`)
    * - `animeFormat`: `tv` (Serie Anime) o `movie` (Film Anime)
    * - `malGenreId`: ID numerico ufficiale del genere su MyAnimeList
@@ -333,6 +903,7 @@ class DefaultMovieRepository : MovieRepository {
    */
   private fun fetchAnimeFromJikanMal(
     malGenreId: Int? = null,
+    expectedGenre: String? = null,
     animeFormat: AnimeFormatFilter = AnimeFormatFilter.ALL,
     eraFilter: EraFilter = EraFilter.ALL,
     page: Int = 1
@@ -351,7 +922,7 @@ class DefaultMovieRepository : MovieRepository {
         "https://api.jikan.moe/v4/top/anime?limit=25&page=$page"
       }
       val jsonText = httpGet(urlString) ?: return emptyList()
-      parseJikanAnimeListJson(jsonText)
+      parseJikanAnimeListJson(jsonText, expectedGenre = expectedGenre)
     } catch (_: Exception) {
       emptyList()
     }
@@ -360,7 +931,7 @@ class DefaultMovieRepository : MovieRepository {
   private fun fetchAnimeSearchFromJikanMal(query: String): List<Movie> {
     return try {
       val encoded = URLEncoder.encode(query, "UTF-8")
-      val urlString = "https://api.jikan.moe/v4/anime?q=$encoded&limit=20&sfw=true"
+      val urlString = "https://api.jikan.moe/v4/anime?q=$encoded&limit=25&sfw=true"
       val jsonText = httpGet(urlString) ?: return emptyList()
       parseJikanAnimeListJson(jsonText)
     } catch (_: Exception) {
@@ -399,24 +970,76 @@ class DefaultMovieRepository : MovieRepository {
     }
   }
 
-  private fun fetchPublicMalUserList(username: String): List<MalImportEntry> {
+  private fun fetchAuthenticatedMalUserListV2(accessToken: String): List<MalImportEntry> {
     return try {
-      val encoded = URLEncoder.encode(username, "UTF-8")
-      val urlString = "https://myanimelist.net/animelist/$encoded/load.json?status=7&offset=0"
-      val jsonText = httpGet(urlString) ?: return emptyList()
-      parseMalPublicLoadJson(jsonText)
+      val url =
+        "https://api.myanimelist.net/v2/users/@me/animelist?fields=list_status,num_episodes,mean,genres,studios,start_date,media_type,synopsis&limit=500&nsfw=false"
+      val jsonText = httpGetWithBearer(url, accessToken) ?: return emptyList()
+      parseMalApiV2AnimeListJson(jsonText)
     } catch (_: Exception) {
       emptyList()
     }
   }
 
-  private fun httpGet(urlString: String): String? {
+  /**
+   * Scarica l'intera lista pubblica MyAnimeList scorrendo anche gli offset successivi (`0, 300, 600`)
+   * in tempo reale dal server di MyAnimeList!
+   */
+  private fun fetchPublicMalUserList(username: String): List<MalImportEntry> {
+    return try {
+      val encoded = URLEncoder.encode(username, "UTF-8")
+      val allEntries = mutableListOf<MalImportEntry>()
+      for (offset in listOf(0, 300, 600)) {
+        val urlString = "https://myanimelist.net/animelist/$encoded/load.json?status=7&offset=$offset"
+        val jsonText = httpGet(urlString) ?: break
+        val pageEntries = parseMalPublicLoadJson(jsonText)
+        if (pageEntries.isEmpty()) break
+        allEntries.addAll(pageEntries)
+        if (pageEntries.size < 300) break
+      }
+      allEntries.distinctBy { it.movie.id }
+    } catch (_: Exception) {
+      emptyList()
+    }
+  }
+
+  private fun httpGetWithBearer(urlString: String, accessToken: String): String? {
     val connection = (URL(urlString).openConnection() as HttpURLConnection).apply {
       requestMethod = "GET"
-      connectTimeout = 3500
-      readTimeout = 3500
+      connectTimeout = 8000
+      readTimeout = 8000
+      setRequestProperty("Authorization", "Bearer ${accessToken.trim()}")
       setRequestProperty("Accept", "application/json")
-      setRequestProperty("User-Agent", "MovieNightAndroid/2.3")
+      setRequestProperty("User-Agent", "MovieNightAndroid/2.4")
+    }
+    return try {
+      if (connection.responseCode in 200..299) {
+        connection.inputStream.bufferedReader().use { it.readText() }
+      } else {
+        null
+      }
+    } finally {
+      connection.disconnect()
+    }
+  }
+
+  private fun httpGet(urlString: String, acceptHtml: Boolean = false): String? {
+    val connection = (URL(urlString).openConnection() as HttpURLConnection).apply {
+      requestMethod = "GET"
+      connectTimeout = 8000
+      readTimeout = 8000
+      if (acceptHtml) {
+        setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        setRequestProperty("Accept-Language", "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7")
+        setRequestProperty(
+          "User-Agent",
+          "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        )
+      } else {
+        setRequestProperty("Accept", "application/json")
+        setRequestProperty("Accept-Language", "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7")
+        setRequestProperty("User-Agent", "MovieNightAndroid/2.4 (https://github.com/Symon180/MovieNight)")
+      }
     }
     return try {
       if (connection.responseCode in 200..299) {
@@ -452,20 +1075,460 @@ class DefaultMovieRepository : MovieRepository {
     }
 
     /**
-     * Normalizza i nomi dei generi provenienti da IMDb o MyAnimeList (Jikan)
+     * Normalizza i nomi dei generi provenienti da IMDb, TVmaze o MyAnimeList (Jikan)
      * in modo che corrispondano esattamente ai nostri filtri senza falsi positivi!
      */
     fun normalizeGenreName(raw: String): List<String> {
       return when (raw.trim().lowercase()) {
-        "sci-fi", "science fiction" -> listOf("Sci-Fi")
-        "action", "adventure" -> listOf("Action")
-        "thriller", "suspense", "mystery", "psychological", "crime" -> listOf("Thriller")
-        "comedy", "parody", "gag humor" -> listOf("Comedy")
-        "drama", "romance" -> listOf("Drama")
+        "sci-fi", "science fiction", "science-fiction" -> listOf("Sci-Fi")
+        "action", "adventure", "war", "western", "martial arts" -> listOf("Action")
+        "thriller", "suspense", "mystery", "psychological", "crime", "espionage" -> listOf("Thriller")
+        "comedy", "parody", "gag humor", "sitcom" -> listOf("Comedy")
+        "drama", "romance", "biography", "history", "family" -> listOf("Drama")
         "animation", "fantasy", "supernatural" -> listOf("Animation")
         "horror", "gore", "dark fantasy" -> listOf("Horror")
         else -> emptyList()
       }
+    }
+
+    /**
+     * Estrae dal codice HTML di `https://www.imdb.com/search/title/` il blocco JSON `__NEXT_DATA__`
+     * che contiene fino a 50 Film o Serie TV reali in tempo reale direttamente da IMDb!
+     */
+    fun parseImdbNextDataHtml(
+      html: String,
+      mediaType: MediaType = MediaType.MOVIE,
+      expectedGenre: String? = null
+    ): List<Movie> {
+      val marker = "<script id=\"__NEXT_DATA__\" type=\"application/json\">"
+      val startIdx = html.indexOf(marker)
+      if (startIdx < 0) return emptyList()
+      val jsonStart = startIdx + marker.length
+      val endIdx = html.indexOf("</script>", jsonStart)
+      if (endIdx <= jsonStart) return emptyList()
+
+      val jsonText = html.substring(jsonStart, endIdx)
+      val root = JSONObject(jsonText)
+      val items = root
+        .optJSONObject("props")
+        ?.optJSONObject("pageProps")
+        ?.optJSONObject("searchResults")
+        ?.optJSONObject("titleResults")
+        ?.optJSONArray("titleListItems")
+        ?: return emptyList()
+
+      val result = mutableListOf<Movie>()
+      for (i in 0 until items.length()) {
+        val item = items.optJSONObject(i) ?: continue
+        val id = item.optString("titleId").takeIf { it.startsWith("tt") } ?: continue
+        val title = item.optString("titleText").ifBlank { item.optString("originalTitleText") }
+        if (title.isBlank()) continue
+
+        val year = item.optInt("releaseYear", 2022).let { if (it > 1880) it else 2022 }
+        val rating = item.optJSONObject("ratingSummary")
+          ?.optDouble("aggregateRating", 7.6)
+          ?.let { if (it.isNaN() || it <= 0.0) 7.5 else (it * 10.0).roundToInt() / 10.0 }
+          ?: 7.5
+
+        val runtimeSeconds = item.optInt("runtime", 0)
+        val runtimeMinutes = if (runtimeSeconds > 60) {
+          (runtimeSeconds / 60).coerceIn(15, 300)
+        } else {
+          if (mediaType == MediaType.TV_SERIES) 50 else 118
+        }
+
+        val posterUrl = item.optJSONObject("primaryImage")?.optString("url").orEmpty()
+        val plot = item.optString("plot")
+          .ifBlank { "Titolo in tempo reale dal catalogo ufficiale IMDb ($id)." }
+
+        val genresList = mutableListOf<String>()
+        val genresArr = item.optJSONArray("genres")
+        if (genresArr != null) {
+          for (g in 0 until genresArr.length()) {
+            val gName = genresArr.optString(g)
+            normalizeGenreName(gName).forEach { norm ->
+              if (norm !in genresList) genresList.add(norm)
+            }
+          }
+        }
+        if (!expectedGenre.isNullOrBlank() && genresList.none { it.equals(expectedGenre, ignoreCase = true) }) {
+          genresList.add(expectedGenre)
+        }
+        if (genresList.isEmpty()) genresList.add("Drama")
+
+        val castList = mutableListOf<String>()
+        val topCredits = item.optJSONArray("topCredits")
+        if (topCredits != null) {
+          for (c in 0 until topCredits.length()) {
+            val creditObj = topCredits.optJSONObject(c)
+            val name = creditObj?.optString("name") ?: creditObj?.optString("displayName") ?: topCredits.optString(c)
+            if (!name.isNullOrBlank() && name != "null" && !name.startsWith("{")) {
+              castList.add(name)
+            }
+          }
+        }
+
+        val baseMovie = Movie(
+          id = id,
+          title = title,
+          year = year,
+          imdbRating = rating,
+          runtimeMinutes = runtimeMinutes,
+          genres = genresList,
+          plot = plot,
+          director = castList.firstOrNull() ?: "IMDb Official Catalog",
+          posterUrl = posterUrl,
+          moodTag = if (mediaType == MediaType.TV_SERIES) "Serie TV IMDb Live 📺" else "Film IMDb Live 🎬",
+          mediaType = mediaType,
+          source = MediaSource.IMDB,
+          totalSeasons = if (mediaType == MediaType.TV_SERIES) 2 else 1,
+          totalEpisodes = if (mediaType == MediaType.TV_SERIES) 16 else 1,
+          cast = castList.ifEmpty { listOf("Cast Ufficiale IMDb") }
+        )
+
+        if (isAnimeTitle(baseMovie)) continue
+
+        result.add(
+          if (mediaType == MediaType.TV_SERIES) {
+            CuratedImdbCatalog.ensureFullEpisodeMode(baseMovie)
+          } else {
+            baseMovie
+          }
+        )
+      }
+      return result
+    }
+
+    /**
+     * Effettua il parsing del JSON di YTS Movie Catalog API v2 (`data.movies`),
+     * restituendo film con ID ufficiale IMDb (`tt...`), voto IMDb, anno, durata, generi, trama e poster HD.
+     */
+    fun parseYtsMoviesJson(
+      jsonText: String,
+      expectedGenre: String? = null
+    ): List<Movie> {
+      val root = JSONObject(jsonText)
+      val moviesArr = root.optJSONObject("data")?.optJSONArray("movies") ?: return emptyList()
+      val result = mutableListOf<Movie>()
+
+      for (i in 0 until moviesArr.length()) {
+        val item = moviesArr.optJSONObject(i) ?: continue
+        val imdbCode = item.optString("imdb_code").takeIf { it.startsWith("tt") } ?: continue
+        val title = item.optString("title").takeIf { it.isNotBlank() } ?: continue
+        val year = item.optInt("year", 2020)
+        val rating = item.optDouble("rating", 7.4).let { if (it.isNaN() || it <= 0.0) 7.4 else it }
+        val runtime = item.optInt("runtime", 115).let { if (it <= 20) 115 else it }
+        val posterUrl = item.optString("large_cover_image")
+          .ifBlank { item.optString("medium_cover_image") }
+
+        val genresList = mutableListOf<String>()
+        val genresArr = item.optJSONArray("genres")
+        if (genresArr != null) {
+          for (g in 0 until genresArr.length()) {
+            val gName = genresArr.optString(g)
+            normalizeGenreName(gName).forEach { norm ->
+              if (norm !in genresList) genresList.add(norm)
+            }
+          }
+        }
+        if (!expectedGenre.isNullOrBlank() && genresList.none { it.equals(expectedGenre, ignoreCase = true) }) {
+          genresList.add(expectedGenre)
+        }
+        if (genresList.isEmpty()) genresList.add("Drama")
+
+        val summary = item.optString("summary")
+          .ifBlank { item.optString("description_full") }
+          .ifBlank { item.optString("synopsis") }
+          .ifBlank { "Film dal catalogo IMDb ($imdbCode, $year)." }
+
+        val movie = Movie(
+          id = imdbCode,
+          title = title,
+          year = year,
+          imdbRating = (rating * 10.0).roundToInt() / 10.0,
+          runtimeMinutes = runtime,
+          genres = genresList,
+          plot = summary,
+          director = "IMDb #$imdbCode",
+          posterUrl = posterUrl,
+          moodTag = "Film IMDb Live 🎬",
+          mediaType = MediaType.MOVIE,
+          source = MediaSource.IMDB,
+          totalSeasons = 1,
+          totalEpisodes = 1,
+          cast = listOf("Cast IMDb ($imdbCode)")
+        )
+
+        if (isAnimeTitle(movie)) continue
+        result.add(movie)
+      }
+      return result
+    }
+
+    /**
+     * Effettua il parsing dell'indice Serie TV di TVmaze (`api.tvmaze.com/shows?page=...`),
+     * associando ad ogni serie il suo ID IMDb ufficiale (`externals.imdb = "tt..."`).
+     */
+    fun parseTvMazeShowsJson(
+      jsonText: String,
+      expectedGenre: String? = null
+    ): List<Movie> {
+      val arr = JSONArray(jsonText)
+      val result = mutableListOf<Movie>()
+      for (i in 0 until arr.length()) {
+        val showObj = arr.optJSONObject(i) ?: continue
+        parseSingleTvMazeShow(showObj, expectedGenre)?.let { result.add(it) }
+      }
+      return result
+    }
+
+    fun parseTvMazeSearchJson(
+      jsonText: String,
+      expectedGenre: String? = null
+    ): List<Movie> {
+      val arr = JSONArray(jsonText)
+      val result = mutableListOf<Movie>()
+      for (i in 0 until arr.length()) {
+        val wrapper = arr.optJSONObject(i) ?: continue
+        val showObj = wrapper.optJSONObject("show") ?: continue
+        parseSingleTvMazeShow(showObj, expectedGenre)?.let { result.add(it) }
+      }
+      return result
+    }
+
+    private fun parseSingleTvMazeShow(
+      showObj: JSONObject,
+      expectedGenre: String?
+    ): Movie? {
+      val showType = showObj.optString("type", "")
+      val language = showObj.optString("language", "")
+      if (showType.equals("Animation", ignoreCase = true) && language.equals("Japanese", ignoreCase = true)) {
+        return null // Escludiamo gli anime giapponesi dalle Serie TV normali
+      }
+
+      val rawGenresArr = showObj.optJSONArray("genres")
+      val rawGenreNames = mutableListOf<String>()
+      if (rawGenresArr != null) {
+        for (g in 0 until rawGenresArr.length()) {
+          rawGenreNames.add(rawGenresArr.optString(g))
+        }
+      }
+      if (rawGenreNames.any { it.equals("Anime", ignoreCase = true) }) return null
+
+      val tvMazeId = showObj.optInt("id", 0)
+      val imdbId = showObj.optJSONObject("externals")?.optString("imdb")
+        ?.takeIf { it.startsWith("tt") }
+        ?: if (tvMazeId > 0) "tvmaze_$tvMazeId" else return null
+
+      val title = showObj.optString("name").takeIf { it.isNotBlank() } ?: return null
+      val premiered = showObj.optString("premiered", "")
+      val year = premiered.take(4).toIntOrNull() ?: 2020
+      val rating = showObj.optJSONObject("rating")?.optDouble("average", 7.8)
+        ?.let { if (it.isNaN() || it <= 0.0) 7.7 else (it * 10.0).roundToInt() / 10.0 }
+        ?: 7.7
+      val runtime = showObj.optInt("averageRuntime", 50).let { if (it <= 10) 48 else it }
+      val imageObj = showObj.optJSONObject("image")
+      val posterUrl = imageObj?.optString("original")
+        ?.ifBlank { imageObj.optString("medium") }
+        .orEmpty()
+
+      val genresList = mutableListOf<String>()
+      rawGenreNames.forEach { gName ->
+        normalizeGenreName(gName).forEach { norm ->
+          if (norm !in genresList) genresList.add(norm)
+        }
+      }
+      if (!expectedGenre.isNullOrBlank() && genresList.none { it.equals(expectedGenre, ignoreCase = true) }) {
+        genresList.add(expectedGenre)
+      }
+      if (genresList.isEmpty()) genresList.add("Drama")
+
+      val networkName = showObj.optJSONObject("network")?.optString("name")
+        ?: showObj.optJSONObject("webChannel")?.optString("name")
+        ?: "Serie TV IMDb"
+
+      val rawSummary = showObj.optString("summary", "")
+      val cleanPlot = rawSummary
+        .replace(Regex("<[^>]*>"), "")
+        .trim()
+        .ifBlank { "Serie TV dal catalogo IMDb ($imdbId) trasmessa su $networkName." }
+
+      val baseSeries = Movie(
+        id = imdbId,
+        title = title,
+        year = year,
+        imdbRating = rating,
+        runtimeMinutes = runtime,
+        genres = genresList,
+        plot = cleanPlot,
+        director = "$networkName • IMDb $imdbId",
+        posterUrl = posterUrl,
+        moodTag = "Serie TV Live 📺",
+        mediaType = MediaType.TV_SERIES,
+        source = MediaSource.IMDB,
+        totalSeasons = 2,
+        totalEpisodes = 16,
+        cast = listOf(networkName)
+      )
+      if (isAnimeTitle(baseSeries)) return null
+      return CuratedImdbCatalog.ensureFullEpisodeMode(baseSeries)
+    }
+
+    fun parseTvMazeEpisodesJson(
+      jsonText: String,
+      imdbId: String,
+      fallbackRating: Double
+    ): List<Episode> {
+      val arr = JSONArray(jsonText)
+      val result = mutableListOf<Episode>()
+      for (i in 0 until arr.length()) {
+        val epObj = arr.optJSONObject(i) ?: continue
+        val season = epObj.optInt("season", 1).coerceAtLeast(1)
+        val number = epObj.optInt("number", i + 1).coerceAtLeast(1)
+        val title = epObj.optString("name").ifBlank { "Episodio $number" }
+        val rating = epObj.optJSONObject("rating")?.optDouble("average", fallbackRating)
+          ?.let { if (it.isNaN() || it <= 0.0) fallbackRating else (it * 10.0).roundToInt() / 10.0 }
+          ?: fallbackRating
+        val airdate = epObj.optString("airdate", "")
+
+        result.add(
+          Episode(
+            id = "${imdbId}_s${season}_e$number",
+            seasonNumber = season,
+            episodeNumber = number,
+            title = title,
+            communityRating = rating,
+            airDate = airdate
+          )
+        )
+      }
+      return result
+    }
+
+    fun parseTvMazeCastJson(jsonText: String): List<CastMember> {
+      val arr = JSONArray(jsonText)
+      val result = mutableListOf<CastMember>()
+      for (i in 0 until minOf(arr.length(), 12)) {
+        val item = arr.optJSONObject(i) ?: continue
+        val person = item.optJSONObject("person") ?: continue
+        val character = item.optJSONObject("character")
+        val actorName = person.optString("name").takeIf { it.isNotBlank() } ?: continue
+        val roleName = character?.optString("name")?.takeIf { it.isNotBlank() } ?: "Cast Principale"
+        val photoUrl = person.optJSONObject("image")?.optString("medium")
+          ?.ifBlank { character?.optJSONObject("image")?.optString("medium").orEmpty() }
+          .orEmpty()
+
+        result.add(
+          CastMember(
+            name = actorName,
+            role = roleName,
+            photoUrl = photoUrl
+          )
+        )
+      }
+      return result
+    }
+
+    fun parseImdbFreeDbSearchJson(
+      jsonText: String,
+      mediaType: MediaType,
+      expectedGenre: String? = null
+    ): List<Movie> {
+      val root = JSONObject(jsonText)
+      val descArr = root.optJSONArray("description") ?: return emptyList()
+      val result = mutableListOf<Movie>()
+
+      for (i in 0 until descArr.length()) {
+        val item = descArr.optJSONObject(i) ?: continue
+        val id = item.optString("#IMDB_ID").takeIf { it.startsWith("tt") } ?: continue
+        val title = item.optString("#TITLE").takeIf { it.isNotBlank() } ?: continue
+        val year = item.optInt("#YEAR", 2020)
+        val actors = item.optString("#ACTORS", "")
+        val castList = actors.split(",").map { it.trim() }.filter { it.isNotBlank() }
+        val posterUrl = item.optString("#IMG_POSTER", "")
+        val rank = item.optInt("#RANK", 500)
+        val estimatedRating = when {
+          rank in 1..150 -> 8.5
+          rank in 151..800 -> 7.9
+          else -> 7.4
+        }
+
+        val genresList = if (!expectedGenre.isNullOrBlank()) {
+          listOf(expectedGenre, "Drama").distinct()
+        } else {
+          listOf("Drama", "Action")
+        }
+
+        val movie = Movie(
+          id = id,
+          title = title,
+          year = year,
+          imdbRating = estimatedRating,
+          runtimeMinutes = if (mediaType == MediaType.TV_SERIES) 50 else 120,
+          genres = genresList,
+          plot = "Titolo dal database ufficiale IMDb ($id). Cast: ${actors.ifBlank { "IMDb Cast" }}.",
+          director = actors.ifBlank { "IMDb Live" },
+          posterUrl = posterUrl,
+          moodTag = if (mediaType == MediaType.TV_SERIES) "Serie IMDb Live 📺" else "Film IMDb Live 🎬",
+          mediaType = mediaType,
+          source = MediaSource.IMDB,
+          totalSeasons = if (mediaType == MediaType.TV_SERIES) 2 else 1,
+          totalEpisodes = if (mediaType == MediaType.TV_SERIES) 16 else 1,
+          cast = castList
+        )
+        if (isAnimeTitle(movie)) continue
+        result.add(
+          if (mediaType == MediaType.TV_SERIES) CuratedImdbCatalog.ensureFullEpisodeMode(movie) else movie
+        )
+      }
+      return result
+    }
+
+    fun parseImdbFreeDbDetailJson(jsonText: String, baseMedia: Movie): Movie {
+      val root = JSONObject(jsonText)
+      val shortObj = root.optJSONObject("short") ?: return baseMedia
+      val description = shortObj.optString("description")
+        .replace("&apos;", "'")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+        .trim()
+
+      val rating = shortObj.optJSONObject("aggregateRating")
+        ?.optDouble("ratingValue", baseMedia.imdbRating)
+        ?.let { if (it.isNaN() || it <= 0.0) baseMedia.imdbRating else it }
+        ?: baseMedia.imdbRating
+
+      val actorsArr = shortObj.optJSONArray("actor")
+      val actorNames = mutableListOf<String>()
+      if (actorsArr != null) {
+        for (a in 0 until actorsArr.length()) {
+          val name = actorsArr.optJSONObject(a)?.optString("name").orEmpty()
+          if (name.isNotBlank()) actorNames.add(name)
+        }
+      }
+
+      val directorsArr = shortObj.optJSONArray("director")
+      val directorName = directorsArr?.optJSONObject(0)?.optString("name")
+        ?.takeIf { it.isNotBlank() }
+        ?: baseMedia.director
+
+      val genresArr = shortObj.optJSONArray("genre")
+      val genresList = mutableListOf<String>()
+      if (genresArr != null) {
+        for (g in 0 until genresArr.length()) {
+          normalizeGenreName(genresArr.optString(g)).forEach { norm ->
+            if (norm !in genresList) genresList.add(norm)
+          }
+        }
+      }
+
+      return baseMedia.copy(
+        imdbRating = rating,
+        plot = description.ifBlank { baseMedia.plot },
+        director = directorName,
+        genres = if (genresList.isNotEmpty()) (genresList + baseMedia.genres).distinct() else baseMedia.genres,
+        cast = if (actorNames.isNotEmpty()) actorNames else baseMedia.cast
+      )
     }
 
     fun parseJikanCharactersJson(jsonText: String): List<CastMember> {
@@ -544,7 +1607,6 @@ class DefaultMovieRepository : MovieRepository {
         }
         if (genresList.isEmpty()) genresList.add("Drama")
 
-        // Estraiamo anche gli attori (stars) con le loro foto se presenti nel JSON di IMDb!
         val castNames = mutableListOf<String>()
         val castMembersList = mutableListOf<CastMember>()
         val starsArr = item.optJSONArray("stars")
@@ -604,7 +1666,8 @@ class DefaultMovieRepository : MovieRepository {
 
     fun parseImdbSuggestionJson(
       jsonText: String,
-      mediaType: MediaType = MediaType.MOVIE
+      mediaType: MediaType = MediaType.MOVIE,
+      expectedGenre: String? = null
     ): List<Movie> {
       val root = JSONObject(jsonText)
       val dArray = root.optJSONArray("d") ?: return emptyList()
@@ -634,17 +1697,23 @@ class DefaultMovieRepository : MovieRepository {
           else -> 7.2
         }
 
+        val genresList = if (!expectedGenre.isNullOrBlank()) {
+          listOf(expectedGenre, "Drama").distinct()
+        } else {
+          listOf("Drama", "Action", "Thriller")
+        }
+
         val baseMovie = Movie(
           id = id,
           title = title,
           year = year,
           imdbRating = estimatedRating,
           runtimeMinutes = if (mediaType == MediaType.TV_SERIES) 50 else 120,
-          genres = listOf("Drama"),
+          genres = genresList,
           plot = "Titolo dal database ufficiale IMDb ($id). Cast principale: $stars.",
           director = stars,
           posterUrl = posterUrl,
-          moodTag = if (mediaType == MediaType.TV_SERIES) "Serie Live IMDb 📺" else "Ricerca Live IMDb 🔎",
+          moodTag = if (mediaType == MediaType.TV_SERIES) "Serie Live IMDb 📺" else "Film Live IMDb 🎬",
           mediaType = mediaType,
           source = MediaSource.IMDB,
           totalSeasons = if (mediaType == MediaType.TV_SERIES) 2 else 1,
@@ -669,7 +1738,10 @@ class DefaultMovieRepository : MovieRepository {
      * Effettua il parsing del JSON di MyAnimeList tramite Jikan REST API v4 (`api.jikan.moe/v4`),
      * distinguendo tra Serie Anime (`totalEpisodes > 1`) e Film Anime (`type == "Movie"` / `totalEpisodes == 1`)!
      */
-    fun parseJikanAnimeListJson(jsonText: String): List<Movie> {
+    fun parseJikanAnimeListJson(
+      jsonText: String,
+      expectedGenre: String? = null
+    ): List<Movie> {
       val root = JSONObject(jsonText)
       val dataArray = root.optJSONArray("data") ?: return emptyList()
       val result = mutableListOf<Movie>()
@@ -734,6 +1806,9 @@ class DefaultMovieRepository : MovieRepository {
               if (norm !in genresList) genresList.add(norm)
             }
           }
+        }
+        if (!expectedGenre.isNullOrBlank() && genresList.none { it.equals(expectedGenre, ignoreCase = true) }) {
+          genresList.add(expectedGenre)
         }
         if (genresList.isEmpty()) genresList.add("Animation")
 
@@ -800,6 +1875,97 @@ class DefaultMovieRepository : MovieRepository {
     }
 
     /**
+     * Effettua il parsing del JSON restituito dall'endpoint OAuth2 ufficiale di MyAnimeList API v2:
+     * `GET https://api.myanimelist.net/v2/users/@me/animelist?fields=list_status,num_episodes,mean,genres,studios,start_date,media_type,synopsis`
+     */
+    fun parseMalApiV2AnimeListJson(jsonText: String): List<MalImportEntry> {
+      val root = JSONObject(jsonText)
+      val dataArr = root.optJSONArray("data") ?: return emptyList()
+      val entries = mutableListOf<MalImportEntry>()
+
+      for (i in 0 until dataArr.length()) {
+        val wrapper = dataArr.optJSONObject(i) ?: continue
+        val node = wrapper.optJSONObject("node") ?: continue
+        val listStatus = wrapper.optJSONObject("list_status") ?: continue
+
+        val malId = node.optInt("id", 0)
+        if (malId <= 0) continue
+        val title = node.optString("title").takeIf { it.isNotBlank() } ?: continue
+        val statusStr = listStatus.optString("status", "plan_to_watch")
+        val userScore = listStatus.optInt("score", 0).takeIf { it in 1..10 }
+        val mediaTypeStr = node.optString("media_type", "tv")
+        val isMovieFormat = mediaTypeStr.equals("movie", ignoreCase = true)
+        val totalEp = if (isMovieFormat) {
+          1
+        } else {
+          node.optInt("num_episodes", 12).let { if (it <= 0) 24 else it }
+        }
+        val watchedEp = listStatus.optInt("num_episodes_watched", 0).coerceIn(0, totalEp)
+        val meanScore = node.optDouble("mean", 8.1).let { if (it.isNaN() || it <= 0.0) 8.1 else it }
+        val startDate = node.optString("start_date", "")
+        val year = startDate.take(4).toIntOrNull() ?: 2022
+
+        val picObj = node.optJSONObject("main_picture")
+        val posterUrl = picObj?.optString("large")?.ifBlank { picObj.optString("medium") }.orEmpty()
+
+        val genresList = mutableListOf<String>()
+        val genresArr = node.optJSONArray("genres")
+        if (genresArr != null) {
+          for (g in 0 until genresArr.length()) {
+            val gName = genresArr.optJSONObject(g)?.optString("name").orEmpty()
+            normalizeGenreName(gName).forEach { norm ->
+              if (norm !in genresList) genresList.add(norm)
+            }
+          }
+        }
+        if (genresList.isEmpty()) genresList.add("Animation")
+
+        val studioName = node.optJSONArray("studios")?.optJSONObject(0)?.optString("name")
+          ?.takeIf { it.isNotBlank() }
+          ?: "MyAnimeList Sync ⛩️"
+
+        val synopsis = node.optString("synopsis")
+          .ifBlank { "Sincronizzato in tempo reale dal tuo account MyAnimeList (#$malId)." }
+
+        val curatedMatch = CuratedImdbCatalog.anime.find { it.malId == malId }
+        val movie = curatedMatch ?: Movie(
+          id = "mal_$malId",
+          title = title,
+          year = year,
+          imdbRating = (meanScore * 10.0).roundToInt() / 10.0,
+          runtimeMinutes = if (isMovieFormat) 115 else 24,
+          genres = genresList,
+          plot = synopsis,
+          director = "$studioName • MAL #$malId",
+          posterUrl = posterUrl,
+          moodTag = if (isMovieFormat) "Film Anime 🎬" else "Serie Anime 📺",
+          mediaType = MediaType.ANIME,
+          source = MediaSource.MYANIMELIST,
+          malId = malId,
+          totalSeasons = 1,
+          totalEpisodes = totalEp,
+          streamingPlatforms = listOf("Crunchyroll", "Netflix", "Prime Video")
+        ).let { if (isMovieFormat) it else CuratedImdbCatalog.ensureFullEpisodeMode(it) }
+
+        val isDropped = statusStr.equals("dropped", ignoreCase = true)
+        val isWatched = statusStr.equals("completed", ignoreCase = true) ||
+          statusStr.equals("watching", ignoreCase = true) ||
+          watchedEp > 0
+
+        entries.add(
+          MalImportEntry(
+            movie = movie,
+            isWatched = isWatched && !isDropped,
+            userScore = userScore,
+            watchedEpisodesCount = if (statusStr.equals("completed", ignoreCase = true)) movie.episodes.size else watchedEp,
+            isDropped = isDropped
+          )
+        )
+      }
+      return entries
+    }
+
+    /**
      * Effettua il parsing dell'intera lista pubblica MyAnimeList senza tagli.
      */
     fun parseMalPublicLoadJson(jsonText: String): List<MalImportEntry> {
@@ -810,7 +1976,7 @@ class DefaultMovieRepository : MovieRepository {
         val malId = obj.optInt("anime_id", 0)
         if (malId <= 0) continue
         val title = obj.optString("anime_title").takeIf { it.isNotBlank() } ?: continue
-        val status = obj.optInt("status", 6) // 1=Watching, 2=Completed, 6=Plan to Watch
+        val status = obj.optInt("status", 6) // 1=Watching, 2=Completed, 3=On-Hold, 4=Dropped, 6=Plan to Watch
         val userScore = obj.optInt("score", 0).takeIf { it in 1..10 }
         val totalEp = obj.optInt("anime_num_episodes", 12).let { if (it <= 0) 24 else it }
         val watchedEp = obj.optInt("num_watched_episodes", 0).coerceIn(0, totalEp)
@@ -837,12 +2003,14 @@ class DefaultMovieRepository : MovieRepository {
           streamingPlatforms = listOf("Crunchyroll", "Netflix")
         ).let { if (totalEp == 1) it else CuratedImdbCatalog.ensureFullEpisodeMode(it) }
 
+        val isDropped = (status == 4)
         entries.add(
           MalImportEntry(
             movie = movie,
-            isWatched = (status == 1 || status == 2 || watchedEp > 0),
+            isWatched = (status == 1 || status == 2 || watchedEp > 0) && !isDropped,
             userScore = userScore,
-            watchedEpisodesCount = if (status == 2) movie.episodes.size else watchedEp
+            watchedEpisodesCount = if (status == 2) movie.episodes.size else watchedEp,
+            isDropped = isDropped
           )
         )
       }

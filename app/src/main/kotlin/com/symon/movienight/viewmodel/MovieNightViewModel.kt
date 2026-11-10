@@ -48,9 +48,17 @@ data class MovieNightUiState(
   val selectedMediaForEpisodes: Movie? = null,                  // Serie TV / Anime aperto nel pannello Episodi & Ratings
   val isLoadingEpisodes: Boolean = false,                       // Caricamento episodi live da Jikan / IMDb
   val malUsername: String = "",                                 // Username MyAnimeList collegato
-  val isSyncingMal: Boolean = false,                            // Stato caricamento import MyAnimeList
+  val malAccessToken: String = "",                              // Token OAuth2 MyAnimeList per sincronizzazione bidirezionale
+  val malClientId: String = "",                                 // Client ID MyAnimeList per login OAuth2 PKCE
+  val malCodeVerifier: String = "",                             // Code Verifier PKCE temporaneo
+  val isSyncingMal: Boolean = false,                            // Stato caricamento import/sync MyAnimeList
   val malSyncMessage: String? = null                            // Messaggio di conferma sincronizzazione MAL
 ) {
+  /**
+   * Indica se la sincronizzazione bidirezionale automatica (App <-> MyAnimeList) è attiva.
+   */
+  val isTwoWayMalActive: Boolean
+    get() = malAccessToken.isNotBlank()
   /**
    * Il titolo attualmente in cima al mazzo (o `null` se il mazzo è temporaneamente vuoto).
    */
@@ -102,7 +110,10 @@ class MovieNightViewModel(
         watchedMovies = saved.watched,
         dislikedIds = saved.dislikedIds,
         userProgress = saved.progress,
-        malUsername = saved.malUsername
+        malUsername = saved.malUsername,
+        malAccessToken = saved.malAccessToken,
+        malClientId = saved.malClientId,
+        malCodeVerifier = saved.malCodeVerifier
       )
     }
     loadCatalog(
@@ -111,6 +122,10 @@ class MovieNightViewModel(
       animeFormat = AnimeFormatFilter.ALL,
       eraFilter = EraFilter.ALL
     )
+    // Se l'utente ha un account MyAnimeList collegato, sincronizza automaticamente in tempo reale all'avvio!
+    if (saved.malUsername.isNotBlank() || saved.malAccessToken.isNotBlank()) {
+      syncMyAnimeListAccount(silent = true)
+    }
   }
 
   private fun persistCurrentLibrary() {
@@ -121,13 +136,24 @@ class MovieNightViewModel(
         watched = state.watchedMovies,
         dislikedIds = state.dislikedIds,
         progress = state.userProgress,
-        malUsername = state.malUsername
+        malUsername = state.malUsername,
+        malAccessToken = state.malAccessToken,
+        malClientId = state.malClientId,
+        malCodeVerifier = state.malCodeVerifier
       )
     )
   }
 
   fun selectTab(tab: AppTab) {
     _uiState.update { it.copy(selectedTab = tab) }
+    val state = _uiState.value
+    if (
+      (tab == AppTab.WATCHLIST || tab == AppTab.WATCHED) &&
+      (state.malUsername.isNotBlank() || state.malAccessToken.isNotBlank()) &&
+      !state.isSyncingMal
+    ) {
+      syncMyAnimeListAccount(silent = true)
+    }
   }
 
   fun selectMediaType(mediaType: MediaType) {
@@ -265,8 +291,47 @@ class MovieNightViewModel(
 
   private fun checkAndLoadMoreIfNeeded() {
     val state = _uiState.value
-    if (state.remainingInDeck <= 4 && state.searchQuery.isBlank()) {
+    if (state.remainingInDeck <= 8 && state.searchQuery.isBlank()) {
       loadMoreDeck()
+    }
+  }
+
+  /**
+   * Sincronizzazione BIDIREZIONALE (App -> MyAnimeList in tempo reale!):
+   * Se l'utente ha collegato il token OAuth2 di MyAnimeList e il titolo è un Anime (`malId != null`),
+   * invia istantaneamente l'aggiornamento su `api.myanimelist.net/v2/anime/{malId}/my_list_status`!
+   */
+  private fun pushAnimeToMalIfConnected(
+    movie: Movie,
+    status: String,
+    score: Int? = null,
+    watchedEpisodes: Int? = null
+  ) {
+    val malId = movie.malId ?: return
+    val token = _uiState.value.malAccessToken.trim()
+    if (token.isEmpty()) return
+
+    viewModelScope.launch {
+      repository.pushMalAnimeStatus(
+        accessToken = token,
+        malId = malId,
+        status = status,
+        score = score,
+        numWatchedEpisodes = watchedEpisodes
+      )
+    }
+  }
+
+  private fun deleteAnimeFromMalIfConnected(movie: Movie) {
+    val malId = movie.malId ?: return
+    val token = _uiState.value.malAccessToken.trim()
+    if (token.isEmpty()) return
+
+    viewModelScope.launch {
+      repository.deleteMalAnimeEntry(
+        accessToken = token,
+        malId = malId
+      )
     }
   }
 
@@ -297,6 +362,7 @@ class MovieNightViewModel(
 
   /**
    * 1. SWIPE A DESTRA (➡️ / Cuore ❤️): "Mettiamolo in lista (Da Vedere)"
+   *    Se è un Anime e MAL è collegato in modalità bidirezionale, aggiorna subito su MAL (`plan_to_watch`)!
    */
   fun likeCurrentMovie() {
     val state = _uiState.value
@@ -313,11 +379,13 @@ class MovieNightViewModel(
       )
     }
     persistCurrentLibrary()
+    pushAnimeToMalIfConnected(movie, status = "plan_to_watch")
     checkAndLoadMoreIfNeeded()
   }
 
   /**
    * 2. SWIPE VERSO L'ALTO (⬆️ / Già Visto ✅): "L'ho già visto"
+   *    Se è un Anime e MAL è collegato, aggiorna subito su MAL (`completed`)!
    */
   fun markCurrentMovieWatched(userRating: Int? = null) {
     val state = _uiState.value
@@ -362,7 +430,8 @@ class MovieNightViewModel(
   }
 
   /**
-   * Apre la scheda dettagliata del programma e carica anche le foto reali degli attori / personaggi!
+   * Apre la scheda dettagliata del programma, arricchisce trama/regista in tempo reale da IMDb
+   * e carica le foto reali degli attori / personaggi!
    */
   fun openProgramDetails(movie: Movie) {
     _uiState.update {
@@ -372,21 +441,21 @@ class MovieNightViewModel(
       )
     }
     viewModelScope.launch {
-      val enrichedCast = repository.fetchCastForMedia(movie)
-      if (enrichedCast.isNotEmpty()) {
-        val updatedMovie = movie.copy(castMembers = enrichedCast)
-        _uiState.update { state ->
-          if (state.selectedMediaForDetails?.id == movie.id) {
-            state.copy(
-              selectedMediaForDetails = updatedMovie,
-              isLoadingCast = false
-            )
-          } else {
-            state.copy(isLoadingCast = false)
-          }
-        }
+      val enrichedMovie = repository.enrichMovieDetails(movie)
+      val enrichedCast = repository.fetchCastForMedia(enrichedMovie)
+      val updatedMovie = if (enrichedCast.isNotEmpty()) {
+        enrichedMovie.copy(castMembers = enrichedCast)
       } else {
-        _uiState.update { it.copy(isLoadingCast = false) }
+        enrichedMovie
+      }
+      _uiState.update { state ->
+        state.copy(
+          selectedMediaForDetails = if (state.selectedMediaForDetails?.id == movie.id) updatedMovie else state.selectedMediaForDetails,
+          isLoadingCast = false,
+          deck = state.deck.map { if (it.id == movie.id) updatedMovie else it },
+          likedMovies = state.likedMovies.map { if (it.id == movie.id) updatedMovie else it },
+          watchedMovies = state.watchedMovies.map { if (it.id == movie.id) updatedMovie else it }
+        )
       }
     }
   }
@@ -411,12 +480,14 @@ class MovieNightViewModel(
       )
     }
     persistCurrentLibrary()
+    pushAnimeToMalIfConnected(movie, status = "plan_to_watch")
   }
 
   /**
    * Sposta o aggiunge un titolo nella sezione "Già Visti" (Watched).
    */
   fun markAsWatched(movie: Movie, userRating: Int? = null) {
+    val effectiveScore = userRating?.coerceIn(1, 10) ?: _uiState.value.userProgress[movie.id]?.userRating
     _uiState.update { state ->
       val updatedWatchlist = state.likedMovies.filterNot { it.id == movie.id }
       val updatedWatched = if (state.watchedMovies.any { it.id == movie.id }) {
@@ -438,6 +509,12 @@ class MovieNightViewModel(
       )
     }
     persistCurrentLibrary()
+    pushAnimeToMalIfConnected(
+      movie = movie,
+      status = "completed",
+      score = effectiveScore,
+      watchedEpisodes = movie.totalEpisodes
+    )
   }
 
   fun moveBackToWatchlist(movie: Movie) {
@@ -454,6 +531,7 @@ class MovieNightViewModel(
       )
     }
     persistCurrentLibrary()
+    pushAnimeToMalIfConnected(movie, status = "plan_to_watch", watchedEpisodes = 0)
   }
 
   fun removeFromWatched(movie: Movie) {
@@ -461,6 +539,7 @@ class MovieNightViewModel(
       state.copy(watchedMovies = state.watchedMovies.filterNot { it.id == movie.id })
     }
     persistCurrentLibrary()
+    deleteAnimeFromMalIfConnected(movie)
   }
 
   fun rateMedia(mediaId: String, rating: Int) {
@@ -472,6 +551,28 @@ class MovieNightViewModel(
       )
     }
     persistCurrentLibrary()
+
+    val state = _uiState.value
+    val targetMovie = state.watchedMovies.find { it.id == mediaId }
+      ?: state.likedMovies.find { it.id == mediaId }
+      ?: state.deck.find { it.id == mediaId }
+      ?: state.selectedMediaForDetails?.takeIf { it.id == mediaId }
+
+    if (targetMovie != null && targetMovie.malId != null) {
+      val watchedEpCount = state.userProgress[mediaId]?.watchedEpisodeIds?.size ?: 0
+      val isCompleted = state.watchedMovies.any { it.id == mediaId }
+      val status = when {
+        isCompleted -> "completed"
+        watchedEpCount > 0 -> "watching"
+        else -> "plan_to_watch"
+      }
+      pushAnimeToMalIfConnected(
+        movie = targetMovie,
+        status = status,
+        score = cleanRating,
+        watchedEpisodes = if (isCompleted && watchedEpCount == 0) targetMovie.totalEpisodes else watchedEpCount
+      )
+    }
   }
 
   fun openEpisodeTracker(movie: Movie) {
@@ -503,6 +604,8 @@ class MovieNightViewModel(
   }
 
   fun toggleEpisodeWatched(media: Movie, episodeId: String) {
+    var newWatchedCount = 0
+    var userScore: Int? = null
     _uiState.update { state ->
       val currentProg = state.userProgress[media.id] ?: UserMediaProgress(mediaId = media.id)
       val updatedSet = if (episodeId in currentProg.watchedEpisodeIds) {
@@ -510,6 +613,8 @@ class MovieNightViewModel(
       } else {
         currentProg.watchedEpisodeIds + episodeId
       }
+      newWatchedCount = updatedSet.size
+      userScore = currentProg.userRating
       val newProg = currentProg.copy(watchedEpisodeIds = updatedSet)
 
       val updatedWatchedList = if (updatedSet.isNotEmpty() && state.watchedMovies.none { it.id == media.id }) {
@@ -524,15 +629,32 @@ class MovieNightViewModel(
       )
     }
     persistCurrentLibrary()
+
+    val totalEps = media.episodes.size.coerceAtLeast(media.totalEpisodes)
+    val malStatus = when {
+      newWatchedCount >= totalEps && totalEps > 0 -> "completed"
+      newWatchedCount > 0 -> "watching"
+      else -> "plan_to_watch"
+    }
+    pushAnimeToMalIfConnected(
+      movie = media,
+      status = malStatus,
+      score = userScore,
+      watchedEpisodes = newWatchedCount
+    )
   }
 
   fun rateEpisode(media: Movie, episodeId: String, rating: Int) {
     val cleanRating = rating.coerceIn(1, 10)
+    var newWatchedCount = 0
+    var computedMediaRating = cleanRating
     _uiState.update { state ->
       val currentProg = state.userProgress[media.id] ?: UserMediaProgress(mediaId = media.id)
       val updatedWatchedSet = currentProg.watchedEpisodeIds + episodeId
       val updatedEpRatings = currentProg.episodeRatings + (episodeId to cleanRating)
       val autoMediaRating = currentProg.userRating ?: updatedEpRatings.values.average().toInt().coerceIn(1, 10)
+      newWatchedCount = updatedWatchedSet.size
+      computedMediaRating = autoMediaRating
       val newProg = currentProg.copy(
         userRating = autoMediaRating,
         watchedEpisodeIds = updatedWatchedSet,
@@ -551,29 +673,77 @@ class MovieNightViewModel(
       )
     }
     persistCurrentLibrary()
+
+    val totalEps = media.episodes.size.coerceAtLeast(media.totalEpisodes)
+    val malStatus = if (newWatchedCount >= totalEps && totalEps > 0) "completed" else "watching"
+    pushAnimeToMalIfConnected(
+      movie = media,
+      status = malStatus,
+      score = computedMediaRating,
+      watchedEpisodes = newWatchedCount
+    )
   }
 
-  fun importFromMyAnimeList(username: String) {
+  /**
+   * Sincronizza in tempo reale l'account MyAnimeList (sia in lettura MAL -> App, sia in scrittura App -> MAL
+   * per gli anime aggiunti localmente che non erano ancora presenti su MAL!).
+   */
+  fun syncMyAnimeListAccount(silent: Boolean = false) {
+    val state = _uiState.value
+    val user = state.malUsername.trim()
+    val token = state.malAccessToken.trim()
+    if (user.isEmpty() && token.isEmpty()) return
+
+    importFromMyAnimeList(
+      username = user,
+      accessToken = token.ifEmpty { null },
+      silent = silent
+    )
+  }
+
+  fun importFromMyAnimeList(
+    username: String,
+    accessToken: String? = null,
+    silent: Boolean = false
+  ) {
     val cleanUser = username.trim()
-    if (cleanUser.isEmpty()) return
+    val effectiveToken = (accessToken ?: _uiState.value.malAccessToken).trim()
+    if (cleanUser.isEmpty() && effectiveToken.isEmpty()) return
 
     viewModelScope.launch {
       _uiState.update {
         it.copy(
-          isSyncingMal = true,
-          malUsername = cleanUser,
-          malSyncMessage = null
+          isSyncingMal = !silent,
+          malUsername = if (cleanUser.isNotEmpty()) cleanUser else it.malUsername,
+          malAccessToken = effectiveToken,
+          malSyncMessage = if (silent) it.malSyncMessage else null
         )
       }
-      val result = repository.importMyAnimeListProfile(cleanUser)
+
+      val result = repository.importMyAnimeListProfile(
+        username = cleanUser,
+        accessToken = effectiveToken.ifEmpty { null }
+      )
+
+      val remoteMalIds = result.entries.mapNotNull { it.movie.malId }.toSet()
+
       _uiState.update { state ->
         var updatedWatchlist = state.likedMovies
         var updatedWatched = state.watchedMovies
+        var updatedDisliked = state.dislikedIds
         val updatedProgress = state.userProgress.toMutableMap()
 
         for (entry in result.entries) {
           val anime = entry.movie
+          if (entry.isDropped) {
+            updatedDisliked = updatedDisliked + anime.id
+            updatedWatchlist = updatedWatchlist.filterNot { it.id == anime.id }
+            continue
+          }
+
           if (entry.isWatched) {
+            // Se su MAL è diventato "Watching" o "Completed", lo spostiamo automaticamente da "Da Vedere" a "Già Visti"!
+            updatedWatchlist = updatedWatchlist.filterNot { it.id == anime.id }
             if (updatedWatched.none { it.id == anime.id }) {
               updatedWatched = updatedWatched + anime
             }
@@ -584,7 +754,7 @@ class MovieNightViewModel(
               .toSet()
             updatedProgress[anime.id] = existing.copy(
               userRating = entry.userScore ?: existing.userRating,
-              watchedEpisodeIds = existing.watchedEpisodeIds + watchedEpIds
+              watchedEpisodeIds = if (watchedEpIds.size >= existing.watchedEpisodeIds.size) watchedEpIds else existing.watchedEpisodeIds
             )
           } else {
             if (updatedWatchlist.none { it.id == anime.id } && updatedWatched.none { it.id == anime.id }) {
@@ -595,15 +765,124 @@ class MovieNightViewModel(
 
         state.copy(
           isSyncingMal = false,
-          malUsername = cleanUser,
-          malSyncMessage = result.message,
+          malUsername = result.username.ifEmpty { state.malUsername },
+          malAccessToken = effectiveToken,
+          malSyncMessage = if (silent) state.malSyncMessage else result.message,
           likedMovies = updatedWatchlist,
           watchedMovies = updatedWatched,
+          dislikedIds = updatedDisliked,
           userProgress = updatedProgress
         )
       }
       persistCurrentLibrary()
+
+      // Se abbiamo un token OAuth2 attivo (Sincronizzazione Bidirezionale), inviamo anche a MyAnimeList
+      // tutti gli anime presenti localmente nell'app che non erano ancora presenti su MAL!
+      if (effectiveToken.isNotEmpty()) {
+        val currentState = _uiState.value
+        val localWatchlistAnime = currentState.likedMovies.filter { it.malId != null && it.malId !in remoteMalIds }
+        for (anime in localWatchlistAnime) {
+          val malId = anime.malId ?: continue
+          repository.pushMalAnimeStatus(
+            accessToken = effectiveToken,
+            malId = malId,
+            status = "plan_to_watch"
+          )
+        }
+        val localWatchedAnime = currentState.watchedMovies.filter { it.malId != null && it.malId !in remoteMalIds }
+        for (anime in localWatchedAnime) {
+          val malId = anime.malId ?: continue
+          val prog = currentState.userProgress[anime.id]
+          repository.pushMalAnimeStatus(
+            accessToken = effectiveToken,
+            malId = malId,
+            status = "completed",
+            score = prog?.userRating,
+            numWatchedEpisodes = prog?.watchedEpisodeIds?.size?.takeIf { it > 0 } ?: anime.totalEpisodes
+          )
+        }
+      }
     }
+  }
+
+  /**
+   * Collega direttamente l'account MyAnimeList con Username + Access Token OAuth2 per attivare
+   * la sincronizzazione bidirezionale in tempo reale (App <-> MAL).
+   */
+  fun connectMalWithAccessToken(username: String, accessToken: String) {
+    val cleanToken = accessToken.trim().removePrefix("Bearer ").trim()
+    val cleanUser = username.trim()
+    if (cleanToken.isEmpty() && cleanUser.isEmpty()) return
+    importFromMyAnimeList(username = cleanUser, accessToken = cleanToken, silent = false)
+  }
+
+  /**
+   * Prepara l'URL ufficiale di login OAuth2 PKCE di MyAnimeList (`myanimelist.net/v1/oauth2/authorize`).
+   */
+  fun prepareMalOAuthLoginUrl(clientId: String): String {
+    val cleanClient = clientId.trim()
+    val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+    val verifier = (1..64).map { chars.random() }.joinToString("")
+    _uiState.update {
+      it.copy(
+        malClientId = cleanClient,
+        malCodeVerifier = verifier
+      )
+    }
+    persistCurrentLibrary()
+    return "https://myanimelist.net/v1/oauth2/authorize?response_type=code&client_id=$cleanClient&code_challenge=$verifier&code_challenge_method=plain&redirect_uri=movienight://mal-oauth"
+  }
+
+  /**
+   * Completa il login OAuth2 PKCE di MyAnimeList quando l'app riceve il deep-link `movienight://mal-oauth?code=...`
+   * (oppure quando l'utente incolla il codice di autorizzazione).
+   */
+  fun completeMalOAuthWithCode(rawCodeOrUrl: String) {
+    val extractedCode = if (rawCodeOrUrl.contains("code=")) {
+      rawCodeOrUrl.substringAfter("code=").substringBefore("&").trim()
+    } else {
+      rawCodeOrUrl.trim()
+    }
+    if (extractedCode.isEmpty()) return
+
+    val state = _uiState.value
+    val clientId = state.malClientId.trim()
+    val verifier = state.malCodeVerifier.trim()
+    if (clientId.isEmpty() || verifier.isEmpty()) return
+
+    viewModelScope.launch {
+      _uiState.update { it.copy(isSyncingMal = true, malSyncMessage = null) }
+      val tokenResult = repository.exchangeMalOAuthCode(
+        clientId = clientId,
+        code = extractedCode,
+        codeVerifier = verifier
+      )
+      if (tokenResult != null) {
+        importFromMyAnimeList(
+          username = tokenResult.username,
+          accessToken = tokenResult.accessToken,
+          silent = false
+        )
+      } else {
+        _uiState.update {
+          it.copy(
+            isSyncingMal = false,
+            malSyncMessage = "Impossibile completare lo scambio OAuth2 con MyAnimeList. Verifica Client ID o Token."
+          )
+        }
+      }
+    }
+  }
+
+  fun disconnectMalAccount() {
+    _uiState.update {
+      it.copy(
+        malUsername = "",
+        malAccessToken = "",
+        malSyncMessage = "Account MyAnimeList scollegato."
+      )
+    }
+    persistCurrentLibrary()
   }
 
   fun dismissMalSyncMessage() {
@@ -636,6 +915,7 @@ class MovieNightViewModel(
       it.copy(likedMovies = it.likedMovies.filterNot { item -> item.id == movie.id })
     }
     persistCurrentLibrary()
+    deleteAnimeFromMalIfConnected(movie)
   }
 
   fun dismissWinner() {
