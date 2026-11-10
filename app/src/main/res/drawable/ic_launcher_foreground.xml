@@ -1,30 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path android:pathData="M31,63.928c0,0 6.4,-11 12.1,-13.1c7.2,-2.6 26,-1.4 26,-1.4l38.1,38.1L107,108.928l-32,-1L31,63.928z">
-        <aapt:attr name="android:fillColor">
-            <gradient
-                android:endX="85.84757"
-                android:endY="92.4963"
-                android:startX="42.9492"
-                android:startY="49.59793"
-                android:type="linear">
-                <item
-                    android:color="#44000000"
-                    android:offset="0.0" />
-                <item
-                    android:color="#00000000"
-                    android:offset="1.0" />
-            </gradient>
-        </aapt:attr>
-    </path>
+
+    <!-- Ombra morbida sotto le carte -->
     <path
-        android:fillColor="#FFFFFF"
-        android:fillType="nonZero"
-        android:pathData="M65.3,45.828l3.8,-6.6c0.2,-0.4 0.1,-0.9 -0.3,-1.1c-0.4,-0.2 -0.9,-0.1 -1.1,0.3l-3.9,6.7c-6.3,-2.8 -13.4,-2.8 -19.7,0l-3.9,-6.7c-0.2,-0.4 -0.7,-0.5 -1.1,-0.3C38.8,38.328 38.7,38.828 38.9,39.228l3.8,6.6C36.2,49.428 31.7,56.028 31,63.928h46C76.3,56.028 71.8,49.428 65.3,45.828zM43.4,57.328c-0.8,0 -1.5,-0.5 -1.8,-1.2c-0.3,-0.7 -0.1,-1.5 0.4,-2.1c0.5,-0.5 1.4,-0.7 2.1,-0.4c0.7,0.3 1.2,1 1.2,1.8C45.3,56.528 44.5,57.328 43.4,57.328L43.4,57.328zM64.6,57.328c-0.8,0 -1.5,-0.5 -1.8,-1.2s-0.1,-1.5 0.4,-2.1c0.5,-0.5 1.4,-0.7 2.1,-0.4c0.7,0.3 1.2,1 1.2,1.8C66.5,56.528 65.6,57.328 64.6,57.328L64.6,57.328z"
-        android:strokeWidth="1"
-        android:strokeColor="#00000000" />
+        android:fillColor="#55000000"
+        android:pathData="M34,32 C34,29 36,27 39,27 L71,27 C74,27 76,29 76,32 L76,78 C76,81 74,83 71,83 L39,83 C36,83 34,81 34,78 Z" />
+
+    <!-- Carta posteriore inclinata a sinistra (Stile mazzo Tinder / Blu MyAnimeList) -->
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:rotation="-12">
+        <path
+            android:fillColor="#FF2E51A2"
+            android:strokeColor="#FF4A73D1"
+            android:strokeWidth="1.5"
+            android:pathData="M35,28 C35,25.2 37.2,23 40,23 L66,23 C68.8,23 71,25.2 71,28 L71,72 C71,74.8 68.8,77 66,77 L40,77 C37.2,77 35,74.8 35,72 Z" />
+    </group>
+
+    <!-- Carta principale in primo piano inclinata leggermente a destra (Swipe Right!) -->
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:rotation="6">
+
+        <!-- Corpo della scheda Cinema con gradiente Oro IMDb -->
+        <path
+            android:pathData="M36,27 C36,24.2 38.2,22 41,22 L69,22 C71.8,22 74,24.2 74,27 L74,73 C74,75.8 71.8,78 69,78 L41,78 C38.2,78 36,75.8 36,73 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:startX="36"
+                    android:startY="22"
+                    android:endX="74"
+                    android:endY="78"
+                    android:type="linear">
+                    <item android:offset="0.0" android:color="#FF242B3D" />
+                    <item android:offset="1.0" android:color="#FF121622" />
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- Bordo Oro IMDb della scheda -->
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#FFF5C518"
+            android:strokeWidth="2.4"
+            android:pathData="M36,27 C36,24.2 38.2,22 41,22 L69,22 C71.8,22 74,24.2 74,27 L74,73 C74,75.8 71.8,78 69,78 L41,78 C38.2,78 36,75.8 36,73 Z" />
+
+        <!-- Fascia superiore stile Ciak Cinematografico (Clapperboard) in Oro IMDb -->
+        <path
+            android:fillColor="#FFF5C518"
+            android:pathData="M37,27 C37,24.8 38.8,23 41,23 L69,23 C71.2,23 73,24.8 73,27 L73,34 L37,34 Z" />
+
+        <!-- Strisce diagonali nere del Ciak -->
+        <path
+            android:fillColor="#FF121622"
+            android:pathData="M41,23 L46,23 L42,34 L37,34 Z" />
+        <path
+            android:fillColor="#FF121622"
+            android:pathData="M51,23 L56,23 L52,34 L47,34 Z" />
+        <path
+            android:fillColor="#FF121622"
+            android:pathData="M61,23 L66,23 L62,34 L57,34 Z" />
+
+        <!-- Simbolo Play / Stella dorata al centro della scheda -->
+        <path
+            android:fillColor="#FFF5C518"
+            android:pathData="M49,44 L64,53 L49,62 Z" />
+
+        <!-- Badge Cuore Verde "Mi Ispira / Swipe" nell'angolo in basso a destra -->
+        <path
+            android:fillColor="#FF2ECC71"
+            android:strokeColor="#FF0D0F14"
+            android:strokeWidth="1.5"
+            android:pathData="M68,69m-8,0a8,8 0,1 1,16 0a8,8 0,1 1,-16 0" />
+        <path
+            android:fillColor="#FF0D0F14"
+            android:pathData="M68,73.2 L64.2,69.5 C63.1,68.4 63.1,66.7 64.2,65.7 C65.1,64.8 66.6,64.9 67.5,65.9 L68,66.5 L68.5,65.9 C69.4,64.9 70.9,64.8 71.8,65.7 C72.9,66.7 72.9,68.4 71.8,69.5 Z" />
+    </group>
 </vector>
