@@ -8,7 +8,9 @@ import com.symon.movienight.data.InMemoryLibraryStorage
 import com.symon.movienight.data.LibrarySnapshot
 import com.symon.movienight.data.LibraryStorage
 import com.symon.movienight.data.MovieRepository
+import com.symon.movienight.model.AnimeFormatFilter
 import com.symon.movienight.model.AppTab
+import com.symon.movienight.model.EraFilter
 import com.symon.movienight.model.MediaType
 import com.symon.movienight.model.Movie
 import com.symon.movienight.model.MovieGenreFilter
@@ -24,11 +26,15 @@ import kotlinx.coroutines.launch
  */
 data class MovieNightUiState(
   val isLoading: Boolean = false,
+  val isLoadingMore: Boolean = false,                           // Caricamento automatico nuove pagine per il mazzo infinito
   val selectedTab: AppTab = AppTab.DISCOVER,
   val selectedMediaType: MediaType = MediaType.MOVIE,
+  val selectedAnimeFormat: AnimeFormatFilter = AnimeFormatFilter.ALL, // Divisione Anime in Serie TV e Film
   val selectedGenre: MovieGenreFilter = MovieGenreFilter.ALL,
+  val selectedEra: EraFilter = EraFilter.ALL,                   // Filtro Epoca / Decennio (anche classici e anni '70/'80/'90)
+  val currentPage: Int = 1,                                     // Pagina corrente del catalogo infinito
   val searchQuery: String = "",
-  val deck: List<Movie> = emptyList(),                          // Mazzo di schede da scorrere
+  val deck: List<Movie> = emptyList(),                          // Mazzo infinito di schede da scorrere
   val currentIndex: Int = 0,                                    // Indice della scheda visibile in cima al mazzo
   val likedMovies: List<Movie> = emptyList(),                   // Sezione "Da Vedere" (Watchlist illimitata)
   val watchedMovies: List<Movie> = emptyList(),                 // Sezione "Già Visti" (Watched)
@@ -37,7 +43,8 @@ data class MovieNightUiState(
   val userProgress: Map<String, UserMediaProgress> = emptyMap(),// Voti personali e progressi episodi per ID
   val pickedWinner: Movie? = null,                              // Il titolo estratto a sorte per la serata!
   val showShortlistSheet: Boolean = false,                      // Mostra/nasconde il riepilogo rapido
-  val selectedMediaForDetails: Movie? = null,                   // Scheda programma aperta a tutto schermo (Trama, Cast, Dove guardarlo, Lingue, Simili)
+  val selectedMediaForDetails: Movie? = null,                   // Scheda programma aperta a tutto schermo
+  val isLoadingCast: Boolean = false,                           // Caricamento foto attori / personaggi live
   val selectedMediaForEpisodes: Movie? = null,                  // Serie TV / Anime aperto nel pannello Episodi & Ratings
   val isLoadingEpisodes: Boolean = false,                       // Caricamento episodi live da Jikan / IMDb
   val malUsername: String = "",                                 // Username MyAnimeList collegato
@@ -45,7 +52,7 @@ data class MovieNightUiState(
   val malSyncMessage: String? = null                            // Messaggio di conferma sincronizzazione MAL
 ) {
   /**
-   * Il titolo attualmente in cima al mazzo (o `null` se il mazzo è finito).
+   * Il titolo attualmente in cima al mazzo (o `null` se il mazzo è temporaneamente vuoto).
    */
   val currentMovie: Movie?
     get() = deck.getOrNull(currentIndex)
@@ -71,11 +78,13 @@ data class MovieNightUiState(
 
 /**
  * Il "cervello" dell'app (ViewModel).
- * Gestisce le 4 direzioni di Swipe:
- * 1. ➡️ Destra (`likeCurrentMovie`): Mettiamolo in lista ("Da Vedere")
- * 2. ⬆️ Alto (`markCurrentMovieWatched`): L'ho già visto ("Già Visti")
- * 3. ⬇️ Basso (`putBackInPool`): Rimettilo nel pool (torna in fondo al mazzo)
- * 4. ⬅️ Sinistra (`skipCurrentMovie`): Non farmelo più vedere (bloccato per sempre in `dislikedIds`)
+ * Gestisce:
+ * - Le 4 direzioni di Swipe (Destra = In Lista, Su = Già Visto, Giù = Rimetti nel Pool, Sinistra = Mai più)
+ * - Il **Mazzo Infinito**: quando restano poche carte, carica automaticamente nuove pagine da IMDb / MyAnimeList
+ *   e ricicla le carte non scartate così il mazzo non finisce mai!
+ * - La divisione degli **Anime in Serie e Film** (`AnimeFormatFilter`)
+ * - Il filtro per **Epoca / Decennio** (`EraFilter`)
+ * - Il caricamento delle **foto reali degli attori e personaggi** quando apri una scheda!
  */
 class MovieNightViewModel(
   private val repository: MovieRepository = DefaultMovieRepository(),
@@ -96,7 +105,12 @@ class MovieNightViewModel(
         malUsername = saved.malUsername
       )
     }
-    loadCatalog(MovieGenreFilter.ALL, MediaType.MOVIE)
+    loadCatalog(
+      genre = MovieGenreFilter.ALL,
+      mediaType = MediaType.MOVIE,
+      animeFormat = AnimeFormatFilter.ALL,
+      eraFilter = EraFilter.ALL
+    )
   }
 
   private fun persistCurrentLibrary() {
@@ -117,26 +131,72 @@ class MovieNightViewModel(
   }
 
   fun selectMediaType(mediaType: MediaType) {
-    if (_uiState.value.selectedMediaType == mediaType && _uiState.value.deck.isNotEmpty()) return
-    loadCatalog(_uiState.value.selectedGenre, mediaType)
+    val state = _uiState.value
+    if (state.selectedMediaType == mediaType && state.deck.isNotEmpty()) return
+    loadCatalog(
+      genre = state.selectedGenre,
+      mediaType = mediaType,
+      animeFormat = state.selectedAnimeFormat,
+      eraFilter = state.selectedEra
+    )
+  }
+
+  fun selectAnimeFormat(animeFormat: AnimeFormatFilter) {
+    val state = _uiState.value
+    loadCatalog(
+      genre = state.selectedGenre,
+      mediaType = MediaType.ANIME,
+      animeFormat = animeFormat,
+      eraFilter = state.selectedEra
+    )
   }
 
   fun selectGenre(genre: MovieGenreFilter) {
-    loadCatalog(genre, _uiState.value.selectedMediaType)
+    val state = _uiState.value
+    loadCatalog(
+      genre = genre,
+      mediaType = state.selectedMediaType,
+      animeFormat = state.selectedAnimeFormat,
+      eraFilter = state.selectedEra
+    )
   }
 
-  private fun loadCatalog(genre: MovieGenreFilter, mediaType: MediaType) {
+  fun selectEra(eraFilter: EraFilter) {
+    val state = _uiState.value
+    loadCatalog(
+      genre = state.selectedGenre,
+      mediaType = state.selectedMediaType,
+      animeFormat = state.selectedAnimeFormat,
+      eraFilter = eraFilter
+    )
+  }
+
+  private fun loadCatalog(
+    genre: MovieGenreFilter,
+    mediaType: MediaType,
+    animeFormat: AnimeFormatFilter,
+    eraFilter: EraFilter
+  ) {
     viewModelScope.launch {
       _uiState.update {
         it.copy(
           isLoading = true,
           selectedGenre = genre,
           selectedMediaType = mediaType,
+          selectedAnimeFormat = animeFormat,
+          selectedEra = eraFilter,
+          currentPage = 1,
           searchQuery = "",
           currentIndex = 0
         )
       }
-      val rawItems = repository.getCatalog(genre, mediaType)
+      val rawItems = repository.getCatalog(
+        genreFilter = genre,
+        mediaType = mediaType,
+        animeFormat = animeFormat,
+        eraFilter = eraFilter,
+        page = 1
+      )
       val state = _uiState.value
       val excludedIds = state.dislikedIds +
         state.likedMovies.map { it.id }.toSet() +
@@ -153,16 +213,78 @@ class MovieNightViewModel(
     }
   }
 
+  /**
+   * Garantisce che il mazzo sia INFINITO:
+   * quando restano <= 5 carte (o l'utente è arrivato in fondo), scarica automaticamente
+   * la pagina successiva dal database online e, se necessario, rimette in coda le carte
+   * non bloccate così non si rimane mai senza schede da scorrere!
+   */
+  fun loadMoreDeck() {
+    val state = _uiState.value
+    if (state.isLoading || state.isLoadingMore) return
+    val nextPage = state.currentPage + 1
+
+    viewModelScope.launch {
+      _uiState.update { it.copy(isLoadingMore = true, currentPage = nextPage) }
+      val moreItems = repository.getCatalog(
+        genreFilter = state.selectedGenre,
+        mediaType = state.selectedMediaType,
+        animeFormat = state.selectedAnimeFormat,
+        eraFilter = state.selectedEra,
+        page = nextPage
+      )
+
+      _uiState.update { current ->
+        val excludedIds = current.dislikedIds +
+          current.likedMovies.map { it.id }.toSet() +
+          current.watchedMovies.map { it.id }.toSet()
+
+        val activeRemainingIds = current.deck.drop(current.currentIndex).map { it.id }.toSet()
+        val freshItems = moreItems.filterNot { it.id in excludedIds || it.id in activeRemainingIds }
+
+        val updatedDeck = if (freshItems.isNotEmpty()) {
+          current.deck + freshItems
+        } else {
+          // Se siamo offline o abbiamo già visto tutte le pagine API di questa combinazione di filtri,
+          // ricicliamo i titoli validi non scartati così il mazzo continua all'infinito!
+          val recyclable = current.deck
+            .take(current.currentIndex)
+            .filterNot { it.id in excludedIds }
+            .distinctBy { it.id }
+            .shuffled()
+          current.deck + recyclable
+        }
+
+        current.copy(
+          isLoadingMore = false,
+          deck = updatedDeck
+        )
+      }
+    }
+  }
+
+  private fun checkAndLoadMoreIfNeeded() {
+    val state = _uiState.value
+    if (state.remainingInDeck <= 4 && state.searchQuery.isBlank()) {
+      loadMoreDeck()
+    }
+  }
+
   fun searchMovies(query: String) {
     _uiState.update { it.copy(searchQuery = query) }
-    val currentType = _uiState.value.selectedMediaType
+    val state = _uiState.value
     if (query.isBlank()) {
-      loadCatalog(_uiState.value.selectedGenre, currentType)
+      loadCatalog(
+        genre = state.selectedGenre,
+        mediaType = state.selectedMediaType,
+        animeFormat = state.selectedAnimeFormat,
+        eraFilter = state.selectedEra
+      )
       return
     }
     viewModelScope.launch {
       _uiState.update { it.copy(isLoading = true) }
-      val results = repository.searchLive(query, currentType)
+      val results = repository.searchLive(query, state.selectedMediaType)
       _uiState.update {
         it.copy(
           isLoading = false,
@@ -175,7 +297,6 @@ class MovieNightViewModel(
 
   /**
    * 1. SWIPE A DESTRA (➡️ / Cuore ❤️): "Mettiamolo in lista (Da Vedere)"
-   * Aggiunge il programma alla Watchlist generale (`likedMovies`) e avanza.
    */
   fun likeCurrentMovie() {
     val state = _uiState.value
@@ -192,11 +313,11 @@ class MovieNightViewModel(
       )
     }
     persistCurrentLibrary()
+    checkAndLoadMoreIfNeeded()
   }
 
   /**
    * 2. SWIPE VERSO L'ALTO (⬆️ / Già Visto ✅): "L'ho già visto"
-   * Aggiunge il programma a `watchedMovies` e passa subito alla scheda successiva.
    */
   fun markCurrentMovieWatched(userRating: Int? = null) {
     val state = _uiState.value
@@ -205,11 +326,11 @@ class MovieNightViewModel(
     _uiState.update {
       it.copy(currentIndex = it.currentIndex + 1)
     }
+    checkAndLoadMoreIfNeeded()
   }
 
   /**
    * 3. SWIPE VERSO IL BASSO (⬇️ / Rimetti nel pool 🔄): "Rimettilo nel pool"
-   * Sposta la carta attuale in fondo al mazzo (`deck + movie`) così riapparirà più avanti!
    */
   fun putBackInPool() {
     val state = _uiState.value
@@ -220,11 +341,11 @@ class MovieNightViewModel(
         currentIndex = it.currentIndex + 1
       )
     }
+    checkAndLoadMoreIfNeeded()
   }
 
   /**
    * 4. SWIPE A SINISTRA (⬅️ / X ✖️): "Non farmelo più vedere"
-   * Salva l'ID in `dislikedIds` (persistente su telefono) così non ti verrà mai più mostrato!
    */
   fun skipCurrentMovie() {
     val state = _uiState.value
@@ -237,17 +358,41 @@ class MovieNightViewModel(
       )
     }
     persistCurrentLibrary()
+    checkAndLoadMoreIfNeeded()
   }
 
   /**
-   * Apre o chiude la scheda dettagliata di qualsiasi programma (Trama, Attori, Dove guardarlo, Lingue, Simili).
+   * Apre la scheda dettagliata del programma e carica anche le foto reali degli attori / personaggi!
    */
   fun openProgramDetails(movie: Movie) {
-    _uiState.update { it.copy(selectedMediaForDetails = movie) }
+    _uiState.update {
+      it.copy(
+        selectedMediaForDetails = movie,
+        isLoadingCast = true
+      )
+    }
+    viewModelScope.launch {
+      val enrichedCast = repository.fetchCastForMedia(movie)
+      if (enrichedCast.isNotEmpty()) {
+        val updatedMovie = movie.copy(castMembers = enrichedCast)
+        _uiState.update { state ->
+          if (state.selectedMediaForDetails?.id == movie.id) {
+            state.copy(
+              selectedMediaForDetails = updatedMovie,
+              isLoadingCast = false
+            )
+          } else {
+            state.copy(isLoadingCast = false)
+          }
+        }
+      } else {
+        _uiState.update { it.copy(isLoadingCast = false) }
+      }
+    }
   }
 
   fun closeProgramDetails() {
-    _uiState.update { it.copy(selectedMediaForDetails = null) }
+    _uiState.update { it.copy(selectedMediaForDetails = null, isLoadingCast = false) }
   }
 
   /**
@@ -509,7 +654,12 @@ class MovieNightViewModel(
     if (state.deck.isEmpty()) {
       _uiState.update { it.copy(dislikedIds = emptySet(), skippedMovies = emptyList()) }
       persistCurrentLibrary()
-      loadCatalog(state.selectedGenre, state.selectedMediaType)
+      loadCatalog(
+        genre = state.selectedGenre,
+        mediaType = state.selectedMediaType,
+        animeFormat = state.selectedAnimeFormat,
+        eraFilter = state.selectedEra
+      )
     } else {
       _uiState.update {
         it.copy(
@@ -517,6 +667,7 @@ class MovieNightViewModel(
           currentIndex = 0
         )
       }
+      loadMoreDeck()
     }
   }
 }

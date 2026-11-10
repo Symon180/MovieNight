@@ -116,7 +116,10 @@ import coil.compose.AsyncImage
 import com.symon.movienight.data.CuratedImdbCatalog
 import com.symon.movienight.data.DefaultMovieRepository
 import com.symon.movienight.data.SharedPreferencesLibraryStorage
+import com.symon.movienight.model.AnimeFormatFilter
 import com.symon.movienight.model.AppTab
+import com.symon.movienight.model.CastMember
+import com.symon.movienight.model.EraFilter
 import com.symon.movienight.model.MediaSource
 import com.symon.movienight.model.MediaType
 import com.symon.movienight.model.Movie
@@ -164,7 +167,10 @@ fun MovieNightRoute() {
     uiState = uiState,
     onSelectTab = viewModel::selectTab,
     onSelectMediaType = viewModel::selectMediaType,
+    onSelectAnimeFormat = viewModel::selectAnimeFormat,
     onSelectGenre = viewModel::selectGenre,
+    onSelectEra = viewModel::selectEra,
+    onLoadMoreDeck = viewModel::loadMoreDeck,
     onSearchQueryChange = viewModel::searchMovies,
     onSwipeLike = viewModel::likeCurrentMovie,
     onSwipeSkip = viewModel::skipCurrentMovie,
@@ -209,6 +215,9 @@ fun MovieNightScreen(
   modifier: Modifier = Modifier,
   onSelectTab: (AppTab) -> Unit = {},
   onSelectMediaType: (MediaType) -> Unit = {},
+  onSelectAnimeFormat: (AnimeFormatFilter) -> Unit = {},
+  onSelectEra: (EraFilter) -> Unit = {},
+  onLoadMoreDeck: () -> Unit = {},
   onSwipeUpWatched: () -> Unit = {},
   onSwipeDownPool: () -> Unit = {},
   onOpenDetails: (Movie) -> Unit = {},
@@ -331,7 +340,10 @@ fun MovieNightScreen(
             uiState = uiState,
             showSearchBar = showSearchBar,
             onSelectMediaType = onSelectMediaType,
+            onSelectAnimeFormat = onSelectAnimeFormat,
             onSelectGenre = onSelectGenre,
+            onSelectEra = onSelectEra,
+            onLoadMoreDeck = onLoadMoreDeck,
             onSearchQueryChange = onSearchQueryChange,
             onSwipeRightLike = onSwipeLike,
             onSwipeLeftDislike = onSwipeSkip,
@@ -515,7 +527,10 @@ private fun DiscoverSection(
   uiState: MovieNightUiState,
   showSearchBar: Boolean,
   onSelectMediaType: (MediaType) -> Unit,
+  onSelectAnimeFormat: (AnimeFormatFilter) -> Unit,
   onSelectGenre: (MovieGenreFilter) -> Unit,
+  onSelectEra: (EraFilter) -> Unit,
+  onLoadMoreDeck: () -> Unit,
   onSearchQueryChange: (String) -> Unit,
   onSwipeRightLike: () -> Unit,
   onSwipeLeftDislike: () -> Unit,
@@ -532,11 +547,19 @@ private fun DiscoverSection(
       onSelectType = onSelectMediaType
     )
 
+    // Se siamo nella sezione Anime, mostriamo la divisione tra Serie Anime 📺 e Film Anime 🎬!
+    AnimatedVisibility(visible = uiState.selectedMediaType == MediaType.ANIME) {
+      AnimeFormatSelectorRow(
+        selectedFormat = uiState.selectedAnimeFormat,
+        onSelectFormat = onSelectAnimeFormat
+      )
+    }
+
     AnimatedVisibility(visible = showSearchBar) {
       val searchPlaceholder = when (uiState.selectedMediaType) {
         MediaType.MOVIE -> "Cerca film o attore su IMDb..."
         MediaType.TV_SERIES -> "Cerca serie TV su IMDb..."
-        MediaType.ANIME -> "Cerca anime su MyAnimeList..."
+        MediaType.ANIME -> "Cerca serie o film anime su MyAnimeList..."
       }
       OutlinedTextField(
         value = uiState.searchQuery,
@@ -571,20 +594,13 @@ private fun DiscoverSection(
       onSelectGenre = onSelectGenre
     )
 
-    // Legenda compatta delle 4 direzioni di Swipe
-    Row(
-      modifier = Modifier
-        .fillMaxWidth()
-        .padding(horizontal = 16.dp, vertical = 2.dp),
-      horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-      Text("⬅️✖️ Scarta", color = SkipRed, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-      Text("⬇️🔄 Nel pool", color = MalBlueLight, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-      Text("⬆️✅ Già visto", color = ImdbGold, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-      Text("➡️❤️ In lista", color = LikeGreen, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-    }
+    // Filtro per Epoca / Decennio (per scoprire anche i grandi classici degli anni '70, '80, '90, 2000!)
+    EraFilterRow(
+      selectedEra = uiState.selectedEra,
+      onSelectEra = onSelectEra
+    )
 
-    // Area centrale con il mazzo di schede (Swipe Deck + 4 Pulsanti liberi sotto)
+    // Area centrale con il mazzo infinito di schede (senza la riga di emoticon sopra il mazzo!)
     Box(
       modifier = Modifier
         .weight(1f)
@@ -658,6 +674,7 @@ private fun DiscoverSection(
           EmptyDeckState(
             likedCount = uiState.likedMovies.size,
             onReshuffle = onReshuffle,
+            onLoadMore = onLoadMoreDeck,
             onPickRandom = onPickRandom
           )
         }
@@ -706,13 +723,53 @@ private fun MediaTypeSelectorRow(
   }
 }
 
+/**
+ * Sotto-selettore per la sezione Anime: divide gli Anime in "Tutti ⛩️", "Serie Anime 📺" e "Film Anime 🎬"!
+ */
+@Composable
+private fun AnimeFormatSelectorRow(
+  selectedFormat: AnimeFormatFilter,
+  onSelectFormat: (AnimeFormatFilter) -> Unit
+) {
+  Row(
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(horizontal = 16.dp, vertical = 2.dp),
+    horizontalArrangement = Arrangement.spacedBy(8.dp)
+  ) {
+    AnimeFormatFilter.entries.forEach { format ->
+      val isSelected = format == selectedFormat
+      Surface(
+        color = if (isSelected) MalBlueLight else CinemaSurface,
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(
+          1.dp,
+          if (isSelected) MalBlueLight else CinemaCardSurface
+        ),
+        modifier = Modifier
+          .weight(1f)
+          .clickable { onSelectFormat(format) }
+      ) {
+        Text(
+          text = format.label,
+          color = if (isSelected) Color.Black else TextSecondary,
+          fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
+          fontSize = 12.sp,
+          textAlign = TextAlign.Center,
+          modifier = Modifier.padding(vertical = 6.dp, horizontal = 4.dp)
+        )
+      }
+    }
+  }
+}
+
 @Composable
 private fun GenreFilterRow(
   selectedGenre: MovieGenreFilter,
   onSelectGenre: (MovieGenreFilter) -> Unit
 ) {
   LazyRow(
-    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 2.dp),
+    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 1.dp),
     horizontalArrangement = Arrangement.spacedBy(8.dp)
   ) {
     items(MovieGenreFilter.entries) { genre ->
@@ -723,7 +780,8 @@ private fun GenreFilterRow(
         label = {
           Text(
             text = genre.label,
-            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+            fontSize = 12.sp
           )
         },
         colors = FilterChipDefaults.filterChipColors(
@@ -737,6 +795,47 @@ private fun GenreFilterRow(
           selected = isSelected,
           borderColor = CinemaCardSurface,
           selectedBorderColor = ImdbGold
+        )
+      )
+    }
+  }
+}
+
+/**
+ * Barra dei filtri per Epoca / Decennio (2020+, Anni 2010, Anni 2000, Anni '90, Anni '80, Classici < '80).
+ */
+@Composable
+private fun EraFilterRow(
+  selectedEra: EraFilter,
+  onSelectEra: (EraFilter) -> Unit
+) {
+  LazyRow(
+    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 1.dp),
+    horizontalArrangement = Arrangement.spacedBy(8.dp)
+  ) {
+    items(EraFilter.entries) { era ->
+      val isSelected = era == selectedEra
+      FilterChip(
+        selected = isSelected,
+        onClick = { onSelectEra(era) },
+        label = {
+          Text(
+            text = era.label,
+            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+            fontSize = 11.sp
+          )
+        },
+        colors = FilterChipDefaults.filterChipColors(
+          selectedContainerColor = MalBlueLight,
+          selectedLabelColor = Color.Black,
+          containerColor = CinemaSurface,
+          labelColor = TextSecondary
+        ),
+        border = FilterChipDefaults.filterChipBorder(
+          enabled = true,
+          selected = isSelected,
+          borderColor = CinemaCardSurface,
+          selectedBorderColor = MalBlueLight
         )
       )
     }
@@ -1532,36 +1631,31 @@ private fun ProgramDetailSheet(
 
       Spacer(modifier = Modifier.height(16.dp))
 
-      // 4. ATTORI / CAST PRINCIPALE
+      // 4. ATTORI / CAST PRINCIPALE CON FOTO RITRATTO!
       Row(verticalAlignment = Alignment.CenterVertically) {
         Icon(Icons.Default.Person, contentDescription = null, tint = ImdbGold, modifier = Modifier.size(18.dp))
         Spacer(modifier = Modifier.width(6.dp))
         Text(
-          text = "Cast, Attori & Produzione",
+          text = if (media.mediaType == MediaType.ANIME) {
+            "Personaggi, Doppiatori & Foto"
+          } else {
+            "Attori & Cast Principale"
+          },
           color = ImdbGold,
           fontWeight = FontWeight.ExtraBold,
           fontSize = 15.sp
         )
       }
-      Spacer(modifier = Modifier.height(8.dp))
-      FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+      Spacer(modifier = Modifier.height(10.dp))
+      LazyRow(
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(vertical = 2.dp)
       ) {
-        media.resolvedCast.forEach { person ->
-          Surface(
-            color = CinemaCardSurface,
-            shape = RoundedCornerShape(10.dp),
-            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
-          ) {
-            Text(
-              text = "🎭 $person",
-              color = TextPrimary,
-              fontSize = 12.sp,
-              fontWeight = FontWeight.Medium,
-              modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-            )
-          }
+        items(media.resolvedCastMembers, key = { it.name + it.role }) { member ->
+          CastMemberPhotoCard(
+            member = member,
+            isMal = isMal
+          )
         }
       }
 
@@ -1646,6 +1740,85 @@ private fun ProgramDetailSheet(
         }
       } else {
         Spacer(modifier = Modifier.height(28.dp))
+      }
+    }
+  }
+}
+
+/**
+ * Scheda fotografica di un Attore o Personaggio con ritratto, nome e ruolo!
+ */
+@Composable
+private fun CastMemberPhotoCard(
+  member: CastMember,
+  isMal: Boolean
+) {
+  Surface(
+    color = CinemaCardSurface,
+    shape = RoundedCornerShape(14.dp),
+    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.1f)),
+    modifier = Modifier.width(106.dp)
+  ) {
+    Column(
+      horizontalAlignment = Alignment.CenterHorizontally,
+      modifier = Modifier.padding(8.dp)
+    ) {
+      Box(
+        modifier = Modifier
+          .size(width = 88.dp, height = 98.dp)
+          .clip(RoundedCornerShape(12.dp))
+          .background(
+            Brush.verticalGradient(
+              colors = listOf(
+                if (isMal) MalBlue else Color(0xFF3A3218),
+                CinemaSurface
+              )
+            )
+          ),
+        contentAlignment = Alignment.Center
+      ) {
+        // Iniziali eleganti di fallback se la foto sta ancora caricando
+        Text(
+          text = member.initials,
+          color = if (isMal) MalBlueLight else ImdbGold,
+          fontWeight = FontWeight.ExtraBold,
+          fontSize = 22.sp
+        )
+
+        if (member.photoUrl.isNotBlank()) {
+          AsyncImage(
+            model = member.photoUrl,
+            contentDescription = "Foto di ${member.name}",
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize()
+          )
+        }
+      }
+
+      Spacer(modifier = Modifier.height(6.dp))
+
+      Text(
+        text = member.name,
+        color = TextPrimary,
+        fontWeight = FontWeight.Bold,
+        fontSize = 12.sp,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+        textAlign = TextAlign.Center,
+        lineHeight = 14.sp
+      )
+
+      if (member.role.isNotBlank()) {
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+          text = member.role,
+          color = if (isMal) MalBlueLight else ImdbGold,
+          fontWeight = FontWeight.Medium,
+          fontSize = 10.sp,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+          textAlign = TextAlign.Center
+        )
       }
     }
   }
@@ -2645,7 +2818,8 @@ private fun EpisodeTrackerSheet(
 private fun EmptyDeckState(
   likedCount: Int,
   onReshuffle: () -> Unit,
-  onPickRandom: () -> Unit
+  onPickRandom: () -> Unit,
+  onLoadMore: () -> Unit = {}
 ) {
   Column(
     horizontalAlignment = Alignment.CenterHorizontally,
@@ -2659,7 +2833,7 @@ private fun EmptyDeckState(
     )
     Spacer(modifier = Modifier.height(16.dp))
     Text(
-      text = "Hai sfogliato tutte le schede di questa selezione!",
+      text = "Vuoi vedere altri titoli?",
       fontWeight = FontWeight.Bold,
       fontSize = 20.sp,
       color = TextPrimary,
@@ -2667,36 +2841,45 @@ private fun EmptyDeckState(
     )
     Spacer(modifier = Modifier.height(8.dp))
     Text(
-      text = if (likedCount > 0) {
-        "Hai $likedCount programmi nella tua lista 'Da Vedere'. Puoi sorteggiarne uno o ricaricare il mazzo!"
-      } else {
-        "Rimescola il mazzo o cambia genere/categoria per scoprire altri titoli."
-      },
+      text = "Puoi caricare subito nuove pagine dal database online oppure rimescolare l'intero catalogo senza limiti!",
       color = TextSecondary,
       textAlign = TextAlign.Center
     )
     Spacer(modifier = Modifier.height(20.dp))
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+      Button(
+        onClick = onLoadMore,
+        colors = ButtonDefaults.buttonColors(
+          containerColor = MalBlueLight,
+          contentColor = Color.Black
+        )
+      ) {
+        Icon(Icons.Default.Sync, contentDescription = null)
+        Spacer(modifier = Modifier.width(6.dp))
+        Text("Carica altri titoli", fontWeight = FontWeight.Bold)
+      }
+
       OutlinedButton(
         onClick = onReshuffle,
         border = BorderStroke(1.dp, ImdbGold)
       ) {
         Icon(Icons.Default.Refresh, contentDescription = null, tint = ImdbGold)
         Spacer(modifier = Modifier.width(6.dp))
-        Text("Rimescola", color = ImdbGold)
+        Text("Rimescola tutto", color = ImdbGold)
       }
-      if (likedCount > 0) {
-        Button(
-          onClick = onPickRandom,
-          colors = ButtonDefaults.buttonColors(
-            containerColor = ImdbGold,
-            contentColor = Color.Black
-          )
-        ) {
-          Icon(Icons.Default.Casino, contentDescription = null)
-          Spacer(modifier = Modifier.width(6.dp))
-          Text("Estrai il vincitore!", fontWeight = FontWeight.Bold)
-        }
+    }
+    if (likedCount > 0) {
+      Spacer(modifier = Modifier.height(10.dp))
+      Button(
+        onClick = onPickRandom,
+        colors = ButtonDefaults.buttonColors(
+          containerColor = ImdbGold,
+          contentColor = Color.Black
+        )
+      ) {
+        Icon(Icons.Default.Casino, contentDescription = null)
+        Spacer(modifier = Modifier.width(6.dp))
+        Text("Sorteggia dalla lista ($likedCount)", fontWeight = FontWeight.Bold)
       }
     }
   }

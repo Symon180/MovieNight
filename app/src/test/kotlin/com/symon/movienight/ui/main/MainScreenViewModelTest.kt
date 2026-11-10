@@ -1,10 +1,13 @@
 package com.symon.movienight.ui.main
 
 import com.symon.movienight.data.CuratedImdbCatalog
+import com.symon.movienight.data.DefaultMovieRepository
 import com.symon.movienight.data.InMemoryLibraryStorage
 import com.symon.movienight.data.MalImportEntry
 import com.symon.movienight.data.MalUserImportResult
 import com.symon.movienight.data.MovieRepository
+import com.symon.movienight.model.AnimeFormatFilter
+import com.symon.movienight.model.EraFilter
 import com.symon.movienight.model.MediaSource
 import com.symon.movienight.model.MediaType
 import com.symon.movienight.model.Movie
@@ -30,14 +33,27 @@ import org.junit.Test
 private class FakeMovieRepository : MovieRepository {
   override suspend fun getCatalog(
     genreFilter: MovieGenreFilter,
-    mediaType: MediaType
+    mediaType: MediaType,
+    animeFormat: AnimeFormatFilter,
+    eraFilter: EraFilter,
+    page: Int
   ): List<Movie> {
     val all = CuratedImdbCatalog.forType(mediaType)
-    return if (genreFilter.apiGenre == null) {
+    val byGenre = if (genreFilter.apiGenre == null) {
       all
     } else {
       all.filter { movie -> movie.genres.any { it.equals(genreFilter.apiGenre, ignoreCase = true) } }
     }
+    val byFormat = if (mediaType != MediaType.ANIME) {
+      byGenre
+    } else {
+      when (animeFormat) {
+        AnimeFormatFilter.ALL -> byGenre
+        AnimeFormatFilter.SERIES -> byGenre.filter { it.isAnimeSeries }
+        AnimeFormatFilter.MOVIE -> byGenre.filter { it.isAnimeMovie }
+      }
+    }
+    return byFormat.filter { eraFilter.matches(it.year) }
   }
 
   override suspend fun searchLiveImdb(query: String): List<Movie> {
@@ -248,5 +264,56 @@ class MainScreenViewModelTest {
     assertTrue(state.likedMovies.any { it.malId == 52991 })
     assertEquals(10, state.userProgress["mal_5114"]?.userRating)
     assertEquals(3, state.userProgress["mal_5114"]?.watchedEpisodeIds?.size)
+  }
+
+  @Test
+  fun `i film anime stanno solo in Anime e la sezione Anime si divide in Serie e Film`() = runTest {
+    val viewModel = MovieNightViewModel(FakeMovieRepository(), InMemoryLibraryStorage())
+
+    // 1. Nella sezione Film normali NON deve esserci La città incantata o altri film anime
+    val normalMovies = viewModel.uiState.value.deck
+    assertFalse(
+      "I film anime non devono stare nella sezione Film!",
+      normalMovies.any { DefaultMovieRepository.isAnimeTitle(it) }
+    )
+
+    // 2. Nella sezione Anime -> Film Anime devono esserci solo i Film Anime (totalEpisodes == 1)
+    viewModel.selectAnimeFormat(AnimeFormatFilter.MOVIE)
+    val animeMovies = viewModel.uiState.value.deck
+    assertTrue("Devono esserci film anime (es. La città incantata, Your Name, Akira)", animeMovies.isNotEmpty())
+    assertTrue("Tutti gli elementi devono essere Film Anime", animeMovies.all { it.isAnimeMovie && !it.isEpisodic })
+    assertTrue(animeMovies.any { it.title.contains("La città incantata") })
+
+    // 3. Nella sezione Anime -> Serie Anime devono esserci solo le Serie Anime (totalEpisodes > 1)
+    viewModel.selectAnimeFormat(AnimeFormatFilter.SERIES)
+    val animeSeries = viewModel.uiState.value.deck
+    assertTrue("Devono esserci serie anime", animeSeries.isNotEmpty())
+    assertTrue("Tutti gli elementi devono essere Serie Anime con episodi", animeSeries.all { it.isAnimeSeries && it.isEpisodic })
+  }
+
+  @Test
+  fun `filtro per epoca mostra i classici e anni 80 e 90`() = runTest {
+    val viewModel = MovieNightViewModel(FakeMovieRepository(), InMemoryLibraryStorage())
+
+    viewModel.selectEra(EraFilter.CLASSICS)
+    val classics = viewModel.uiState.value.deck
+    assertTrue("Devono esserci film classici (< 1980) come Il Padrino o Alien", classics.isNotEmpty())
+    assertTrue("Tutti i titoli devono essere usciti prima del 1980", classics.all { it.year <= 1979 })
+
+    viewModel.selectEra(EraFilter.YEARS_80S)
+    val eighties = viewModel.uiState.value.deck
+    assertTrue("Devono esserci film anni '80 come Ritorno al futuro o Blade Runner", eighties.isNotEmpty())
+    assertTrue("Tutti i titoli devono essere degli anni '80", eighties.all { it.year in 1980..1989 })
+  }
+
+  @Test
+  fun `attori e personaggi hanno foto ritratto associate`() = runTest {
+    val inception = CuratedImdbCatalog.movies.first { it.id == "tt1375666" }
+    val castMembers = inception.resolvedCastMembers
+    assertTrue("Deve esserci il cast di Inception", castMembers.isNotEmpty())
+    assertTrue(
+      "Leonardo DiCaprio deve avere l'URL della sua foto ritratto",
+      castMembers.first().photoUrl.startsWith("https://")
+    )
   }
 }
